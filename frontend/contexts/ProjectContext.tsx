@@ -15,10 +15,9 @@ interface ProjectContextType {
   // Projects
   projects: Project[]
   currentProject: Project | null
-  createProject: (name: string, assetSavePath?: string) => Project
+  createProject: (name: string) => Project
   deleteProject: (id: string) => void
   renameProject: (id: string, name: string) => void
-  updateProject: (id: string, updates: Partial<Pick<Project, 'assetSavePath'>>) => void
   
   // Assets
   addAsset: (projectId: string, asset: Omit<Asset, 'id' | 'createdAt'>) => Asset
@@ -183,7 +182,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   
   const currentProject = projects.find(p => p.id === currentProjectId) || null
   
-  const createProject = useCallback((name: string, assetSavePath?: string): Project => {
+  const createProject = useCallback((name: string): Project => {
     const defaultTimeline = createDefaultTimeline('Timeline 1')
     const newProject: Project = {
       id: `project-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -193,7 +192,6 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       assets: [],
       timelines: [defaultTimeline],
       activeTimelineId: defaultTimeline.id,
-      assetSavePath,
     }
     setProjects(prev => [newProject, ...prev])
     return newProject
@@ -213,12 +211,6 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     ))
   }, [])
 
-  const updateProject = useCallback((id: string, updates: Partial<Pick<Project, 'assetSavePath'>>) => {
-    setProjects(prev => prev.map(p =>
-      p.id === id ? { ...p, ...updates, updatedAt: Date.now() } : p
-    ))
-  }, [])
-  
   const addAsset = useCallback((projectId: string, assetData: Omit<Asset, 'id' | 'createdAt'>): Asset => {
     const newAsset: Asset = {
       ...assetData,
@@ -495,7 +487,6 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       createProject,
       deleteProject,
       renameProject,
-      updateProject,
       addAsset,
       deleteAsset,
       updateAsset,

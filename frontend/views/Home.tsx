@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Plus, Folder, FolderOpen, MoreVertical, Trash2, Pencil, Sparkles } from 'lucide-react'
+import { useState } from 'react'
+import { Plus, Folder, MoreVertical, Trash2, Pencil, Sparkles } from 'lucide-react'
 import { useProjects } from '../contexts/ProjectContext'
 import { LtxLogo } from '../components/LtxLogo'
 import { Button } from '../components/ui/button'
@@ -16,12 +16,11 @@ function formatDate(timestamp: number): string {
   })
 }
 
-function ProjectCard({ project, onOpen, onDelete, onRename, onSetAssetFolder }: { 
+function ProjectCard({ project, onOpen, onDelete, onRename }: {
   project: Project
   onOpen: () => void
   onDelete: () => void
   onRename: () => void
-  onSetAssetFolder: () => void
 }) {
   const [showMenu, setShowMenu] = useState(false)
   const [imgError, setImgError] = useState(false)
@@ -93,13 +92,6 @@ function ProjectCard({ project, onOpen, onDelete, onRename, onSetAssetFolder }: 
             Rename
           </button>
           <button
-            onClick={() => { onSetAssetFolder(); setShowMenu(false) }}
-            className="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-700 flex items-center gap-2"
-          >
-            <FolderOpen className="h-4 w-4" />
-            Asset Folder
-          </button>
-          <button
             onClick={() => { onDelete(); setShowMenu(false) }}
             className="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-700 flex items-center gap-2"
           >
@@ -113,50 +105,19 @@ function ProjectCard({ project, onOpen, onDelete, onRename, onSetAssetFolder }: 
 }
 
 export function Home() {
-  const { projects, createProject, deleteProject, renameProject, updateProject, openProject, openPlayground } = useProjects()
+  const { projects, createProject, deleteProject, renameProject, openProject, openPlayground } = useProjects()
   const [isCreating, setIsCreating] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
-  const [newProjectAssetPath, setNewProjectAssetPath] = useState('')
-  const [defaultDownloadsPath, setDefaultDownloadsPath] = useState('')
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  const [assetFolderProjectId, setAssetFolderProjectId] = useState<string | null>(null)
-  const [assetFolderPath, setAssetFolderPath] = useState('')
 
-  useEffect(() => {
-    window.electronAPI?.getDownloadsPath().then(p => {
-      setDefaultDownloadsPath(p)
-    }).catch(() => {})
-  }, [])
-
-  const getDefaultAssetPath = (name: string) => {
-    if (!defaultDownloadsPath) return ''
-    const sep = defaultDownloadsPath.includes('\\') ? '\\' : '/'
-    return `${defaultDownloadsPath}${sep}Ltx Desktop Assets${sep}${name}`
-  }
-  
   const handleCreateProject = () => {
     if (newProjectName.trim()) {
-      const assetPath = newProjectAssetPath.trim() || getDefaultAssetPath(newProjectName.trim())
-      const project = createProject(newProjectName.trim(), assetPath || undefined)
+      const project = createProject(newProjectName.trim())
       setNewProjectName('')
-      setNewProjectAssetPath('')
       setIsCreating(false)
       openProject(project.id)
     }
-  }
-
-  const handleBrowseAssetFolder = async (setter: (v: string) => void) => {
-    const dir = await window.electronAPI?.showOpenDirectoryDialog({ title: 'Select Asset Folder' })
-    if (dir) setter(dir)
-  }
-
-  const handleSaveAssetFolder = () => {
-    if (assetFolderProjectId && assetFolderPath.trim()) {
-      updateProject(assetFolderProjectId, { assetSavePath: assetFolderPath.trim() })
-    }
-    setAssetFolderProjectId(null)
-    setAssetFolderPath('')
   }
   
   const handleRenameProject = (id: string, currentName: string) => {
@@ -281,10 +242,6 @@ export function Home() {
                     }
                   }}
                   onRename={() => handleRenameProject(project.id, project.name)}
-                  onSetAssetFolder={() => {
-                    setAssetFolderProjectId(project.id)
-                    setAssetFolderPath(project.assetSavePath || getDefaultAssetPath(project.name))
-                  }}
                 />
               ))}
             </div>
@@ -306,31 +263,10 @@ export function Home() {
               autoFocus
               onKeyDown={(e) => e.key === 'Enter' && handleCreateProject()}
             />
-            <div className="mt-4">
-              <label className="text-xs text-zinc-500 uppercase tracking-wider font-semibold mb-1.5 block">Asset Save Folder</label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={newProjectAssetPath || (newProjectName.trim() ? getDefaultAssetPath(newProjectName.trim()) : '')}
-                  onChange={(e) => setNewProjectAssetPath(e.target.value)}
-                  placeholder={newProjectName.trim() ? getDefaultAssetPath(newProjectName.trim()) : 'Downloads/Ltx Desktop Assets/...'}
-                  className="flex-1 px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-blue-500 truncate"
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="border-zinc-700 flex-shrink-0"
-                  onClick={() => handleBrowseAssetFolder(setNewProjectAssetPath)}
-                >
-                  <FolderOpen className="h-4 w-4" />
-                </Button>
-              </div>
-              <p className="text-[10px] text-zinc-600 mt-1">Where generated assets will be saved</p>
-            </div>
             <div className="flex gap-3 mt-6">
               <Button
                 variant="outline"
-                onClick={() => { setIsCreating(false); setNewProjectName(''); setNewProjectAssetPath('') }}
+                onClick={() => { setIsCreating(false); setNewProjectName('') }}
                 className="flex-1 border-zinc-700"
               >
                 Cancel
@@ -381,52 +317,6 @@ export function Home() {
         </div>
       )}
 
-      {/* Asset Folder Modal */}
-      {assetFolderProjectId && (() => {
-        const proj = projects.find(p => p.id === assetFolderProjectId)
-        return (
-          <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-            <div className="bg-zinc-900 rounded-xl p-6 w-full max-w-md border border-zinc-800">
-              <h2 className="text-xl font-semibold text-white mb-1">Asset Save Folder</h2>
-              <p className="text-xs text-zinc-500 mb-4">Where generated assets for "{proj?.name}" will be saved</p>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={assetFolderPath}
-                  onChange={(e) => setAssetFolderPath(e.target.value)}
-                  placeholder="Select a folder..."
-                  className="flex-1 px-3 py-2.5 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-blue-500 truncate"
-                  autoFocus
-                  onKeyDown={(e) => e.key === 'Enter' && handleSaveAssetFolder()}
-                />
-                <Button
-                  variant="outline"
-                  className="border-zinc-700 flex-shrink-0"
-                  onClick={() => handleBrowseAssetFolder(setAssetFolderPath)}
-                >
-                  <FolderOpen className="h-4 w-4" />
-                </Button>
-              </div>
-              <div className="flex gap-3 mt-6">
-                <Button
-                  variant="outline"
-                  onClick={() => { setAssetFolderProjectId(null); setAssetFolderPath('') }}
-                  className="flex-1 border-zinc-700"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleSaveAssetFolder}
-                  disabled={!assetFolderPath.trim()}
-                  className="flex-1 bg-blue-600 hover:bg-blue-500"
-                >
-                  Save
-                </Button>
-              </div>
-            </div>
-          </div>
-        )
-      })()}
     </div>
   )
 }

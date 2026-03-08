@@ -55,7 +55,6 @@ export interface MenuDepsParams {
   setIcLoraSourceClipId: (v: string | null) => void
   setActiveTool: (v: ToolType) => void
   setLastTrimTool: (v: ToolType) => void
-  setShowProjectSettings: (v: boolean) => void
   handleAddTimeline: () => void
   handleDuplicateTimeline: (id: string) => void
   handleResetLayout: () => void
@@ -79,8 +78,6 @@ export function buildMenuDefinitions(p: MenuDepsParams): MenuDefinition[] {
         { id: 'export-timeline', label: 'Export Timeline...', shortcut: 'Ctrl+E', action: () => p.setShowExportModal(true) },
         { id: 'export-xml', label: 'Export FCP7 XML...', action: () => p.handleExportTimelineXml() },
         { id: 'export-srt', label: 'Export Subtitles (SRT)...', action: () => p.handleExportSrt(), disabled: p.subtitles.length === 0 },
-        { id: 'sep-2', label: '', separator: true },
-        { id: 'project-settings', label: 'Project Settings...', action: () => p.setShowProjectSettings(true) },
       ],
     },
 

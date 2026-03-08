@@ -1,39 +1,12 @@
 import { randomUUID } from 'crypto';
 import { app } from 'electron';
-import fs from 'fs';
-import path from 'path';
 import { isDev } from './config';
+import { readAppState, writeAppState } from './app-state';
 
 const ANALYTICS_ENDPOINT = 'https://ltx-desktop.lightricks.com/v2/ingest';
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [1000, 3000, 10000]
-
-interface AppState {
-  analyticsEnabled?: boolean
-  installationId?: string
-  [key: string]: unknown
-}
-
-function getAppStatePath(): string {
-  return path.join(app.getPath('userData'), 'app_state.json')
-}
-
-function readAppState(): AppState {
-  const statePath = getAppStatePath()
-  try {
-    if (fs.existsSync(statePath)) {
-      return JSON.parse(fs.readFileSync(statePath, 'utf-8')) as AppState
-    }
-  } catch (err) {
-    console.warn('[analytics] failed to read app state:', err)
-  }
-  return {}
-}
-
-function writeAppState(state: AppState): void {
-  fs.writeFileSync(getAppStatePath(), JSON.stringify(state, null, 2))
-}
 
 export function getAnalyticsState(): { analyticsEnabled: boolean; installationId: string } {
   const state = readAppState()

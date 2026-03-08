@@ -46,8 +46,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // Paths
   getDownloadsPath: (): Promise<string> => ipcRenderer.invoke('get-downloads-path'),
-  ensureDirectory: (dirPath: string): Promise<{ success: boolean; error?: string }> =>
-    ipcRenderer.invoke('ensure-directory', dirPath),
+  // Project assets
+  copyToProjectAssets: (srcPath: string, projectId: string): Promise<{ success: boolean; path?: string; url?: string; error?: string }> =>
+    ipcRenderer.invoke('copy-to-project-assets', srcPath, projectId),
+  getProjectAssetsPath: (): Promise<string> =>
+    ipcRenderer.invoke('get-project-assets-path'),
+  setProjectAssetsPath: (newPath: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('set-project-assets-path', newPath),
 
   // File save/export
   showSaveDialog: (options: { title?: string; defaultPath?: string; filters?: { name: string; extensions: string[] }[] }): Promise<string | null> =>
@@ -60,9 +65,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('show-open-directory-dialog', options),
   searchDirectoryForFiles: (dir: string, filenames: string[]): Promise<Record<string, string>> =>
     ipcRenderer.invoke('search-directory-for-files', dir, filenames),
-  copyFile: (src: string, dest: string): Promise<{ success: boolean; error?: string }> =>
-    ipcRenderer.invoke('copy-file', src, dest),
-  
   // Check multiple files at once
   checkFilesExist: (filePaths: string[]): Promise<Record<string, boolean>> =>
     ipcRenderer.invoke('check-files-exist', filePaths),
@@ -154,13 +156,14 @@ declare global {
       openLogFolder: () => Promise<boolean>
       getResourcePath: () => Promise<string | null>
       getDownloadsPath: () => Promise<string>
-      ensureDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
+      copyToProjectAssets: (srcPath: string, projectId: string) => Promise<{ success: boolean; path?: string; url?: string; error?: string }>
+      getProjectAssetsPath: () => Promise<string>
+      setProjectAssetsPath: (newPath: string) => Promise<{ success: boolean; error?: string }>
       showSaveDialog: (options: { title?: string; defaultPath?: string; filters?: { name: string; extensions: string[] }[] }) => Promise<string | null>
       saveFile: (filePath: string, data: string, encoding?: string) => Promise<{ success: boolean; path?: string; error?: string }>
       saveBinaryFile: (filePath: string, data: ArrayBuffer) => Promise<{ success: boolean; path?: string; error?: string }>
       showOpenDirectoryDialog: (options: { title?: string }) => Promise<string | null>
       searchDirectoryForFiles: (dir: string, filenames: string[]) => Promise<Record<string, string>>
-      copyFile: (src: string, dest: string) => Promise<{ success: boolean; error?: string }>
       checkFilesExist: (filePaths: string[]) => Promise<Record<string, boolean>>
       showOpenFileDialog: (options: { title?: string; filters?: { name: string; extensions: string[] }[]; properties?: string[] }) => Promise<string[] | null>
       exportNative: (data: {

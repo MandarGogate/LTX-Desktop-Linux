@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import path from 'path'
 import os from 'os'
+import { getProjectAssetsPath } from './app-state'
 
 export const PYTHON_PORT = 8000
 export const BACKEND_BASE_URL = `http://localhost:${PYTHON_PORT}`
@@ -26,5 +27,6 @@ export function getAllowedRoots(): string[] {
   if (!isDev && process.resourcesPath) {
     roots.push(process.resourcesPath)
   }
+  roots.push(getProjectAssetsPath())
   return roots
 }

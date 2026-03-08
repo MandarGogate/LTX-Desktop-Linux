@@ -1,4 +1,4 @@
-import { AlertCircle, Check, Download, Film, Info, KeyRound, Settings, Sliders, Sparkles, X, Zap } from 'lucide-react'
+import { AlertCircle, Check, Download, Film, Folder, Info, KeyRound, Settings, Sliders, Sparkles, X, Zap } from 'lucide-react'
 import React, { useEffect, useRef, useState } from 'react'
 import { Button } from './ui/button'
 import { useAppSettings, type AppSettings } from '../contexts/AppSettingsContext'
@@ -41,6 +41,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
   const [modelLicenseLoading, setModelLicenseLoading] = useState(false)
   const [showModelLicense, setShowModelLicense] = useState(false)
   const [analyticsEnabled, setAnalyticsEnabled] = useState(false)
+  const [projectAssetsPath, setProjectAssetsPath] = useState('')
 
   // Sync active tab with initialTab prop when modal opens
   useEffect(() => {
@@ -73,6 +74,9 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
     if (!isOpen) return
     window.electronAPI.getAnalyticsState()
       .then((state: { analyticsEnabled: boolean }) => setAnalyticsEnabled(state.analyticsEnabled))
+      .catch(() => {})
+    window.electronAPI.getProjectAssetsPath()
+      .then((p: string) => setProjectAssetsPath(p))
       .catch(() => {})
   }, [isOpen])
 
@@ -320,6 +324,35 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
         <div className="px-6 py-5 space-y-6 h-[60vh] overflow-y-auto">
           {activeTab === 'general' && (
             <>
+              {/* Project Assets Path */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Download className="h-4 w-4 text-blue-400" />
+                  <h3 className="text-sm font-semibold text-white">Project Assets Path</h3>
+                </div>
+                <p className="text-xs text-zinc-500 leading-relaxed">
+                  Where generated video and image assets are saved. Each project gets a subfolder.
+                </p>
+                <div className="flex gap-2">
+                  <div className="flex-1 px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm truncate select-text">
+                    {projectAssetsPath || <span className="text-zinc-600">Not set</span>}
+                  </div>
+                  <Button
+                    variant="outline"
+                    className="border-zinc-700 flex-shrink-0"
+                    onClick={async () => {
+                      const dir = await window.electronAPI.showOpenDirectoryDialog({ title: 'Select Project Assets Path' })
+                      if (dir) {
+                        setProjectAssetsPath(dir)
+                        window.electronAPI.setProjectAssetsPath(dir)
+                      }
+                    }}
+                  >
+                    <Folder className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
               {!forceApiGenerations && (
                 <div className="space-y-4">
                   <div className="flex items-center gap-2">

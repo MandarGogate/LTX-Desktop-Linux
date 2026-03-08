@@ -12,7 +12,7 @@ import {
   X, RefreshCw, Loader2,
   MessageSquare, FileUp, FileDown,
   Link2, Type, // EFFECTS HIDDEN: removed Search // IC-LORA HIDDEN: removed Sparkles
-  CircleDot, Circle, RotateCcw, Save, LayoutGrid, PanelRight, Folder
+  CircleDot, Circle, RotateCcw, Save, LayoutGrid, PanelRight
 } from 'lucide-react'
 import { useProjects } from '../contexts/ProjectContext'
 import { useKeyboardShortcuts } from '../contexts/KeyboardShortcutsContext'
@@ -73,7 +73,7 @@ const TRACK_FWD_ONE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(TRACK
 
 export function VideoEditor() {
   const { 
-    currentProject, currentProjectId, addAsset, deleteAsset, updateAsset, updateProject,
+    currentProject, currentProjectId, addAsset, deleteAsset, updateAsset,
     addTakeToAsset, deleteTakeFromAsset, setAssetActiveTake,
     addTimeline, deleteTimeline, renameTimeline, duplicateTimeline,
     setActiveTimeline, updateTimeline, getActiveTimeline,
@@ -98,6 +98,7 @@ export function VideoEditor() {
     videoUrl: regenVideoUrl,
     videoPath: regenVideoPath,
     imageUrl: regenImageUrl,
+    imagePath: regenImagePath,
     error: regenError,
     cancel: regenCancel,
     reset: regenReset,
@@ -226,9 +227,6 @@ export function VideoEditor() {
 
   // Export modal
   const [showExportModal, setShowExportModal] = useState(false)
-  
-  // Project settings modal
-  const [showProjectSettings, setShowProjectSettings] = useState(false)
   
   // Import timeline modal
   const [showImportTimelineModal, setShowImportTimelineModal] = useState(false)
@@ -998,9 +996,9 @@ export function VideoEditor() {
     clips, tracks, setClips, setTracks, setSubtitles, currentProjectId,
     addAsset, resolveClipSrc,
     regenGenerate, regenGenerateImage,
-    regenVideoUrl, regenVideoPath, regenImageUrl,
+    regenVideoUrl, regenVideoPath, regenImageUrl, regenImagePath,
     isRegenerating, regenProgress, regenCancel, regenReset, regenError,
-    assetSavePath: currentProject?.assetSavePath,
+    projectId: currentProjectId ?? '',
   })
   deleteGapRef.current = deleteGap
 
@@ -1081,10 +1079,10 @@ export function VideoEditor() {
     addAsset, updateAsset, addTakeToAsset, deleteTakeFromAsset,
     resolveClipSrc,
     regenGenerate, regenGenerateImage,
-    regenVideoUrl, regenVideoPath, regenImageUrl,
+    regenVideoUrl, regenVideoPath, regenImageUrl, regenImagePath,
     isRegenerating, regenProgress, regenStatusMessage,
     regenCancel, regenReset, regenError,
-    assetSavePath: currentProject?.assetSavePath,
+    projectId: currentProjectId ?? '',
     shouldVideoGenerateWithLtxApi,
   })
   
@@ -1675,7 +1673,7 @@ export function VideoEditor() {
     addTextClip, addSubtitleTrack, createAdjustmentLayerAsset, setSnapEnabled, fitToViewRef, setZoom,
     setShowSourceMonitor, setShowEffectsBrowser, setShowPropertiesPanel,
     setShowICLoraPanel: _setShowICLoraPanel, setIcLoraSourceClipId: _setIcLoraSourceClipId, // IC-LORA HIDDEN
-    setActiveTool, setLastTrimTool, setShowProjectSettings,
+    setActiveTool, setLastTrimTool,
     handleAddTimeline, handleDuplicateTimeline, handleResetLayout,
   }), [selectedClip, selectedClipIds, clips, tracks, subtitles, snapEnabled, showEffectsBrowser, showSourceMonitor, showPropertiesPanel, _showICLoraPanel, sourceAsset, activeTool, activeTimeline, timelines, handleInsertEdit, handleOverwriteEdit, kbLayout])
 
@@ -4088,63 +4086,6 @@ export function VideoEditor() {
         onImport={handleImportTimeline}
       />
       
-      {/* Project Settings Modal */}
-      {showProjectSettings && currentProject && (() => {
-        const projectAssetPath = currentProject.assetSavePath || ''
-        return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setShowProjectSettings(false)}>
-            <div className="bg-zinc-900 rounded-2xl border border-zinc-700/50 shadow-2xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
-              <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
-                <h2 className="text-lg font-bold text-white">Project Settings</h2>
-                <button onClick={() => setShowProjectSettings(false)} className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors">
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-              <div className="p-6 space-y-5">
-                <div>
-                  <label className="text-xs text-zinc-500 uppercase tracking-wider font-semibold mb-1.5 block">Project Name</label>
-                  <p className="text-sm text-white">{currentProject.name}</p>
-                </div>
-                <div>
-                  <label className="text-xs text-zinc-500 uppercase tracking-wider font-semibold mb-1.5 block">Asset Save Folder</label>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      defaultValue={projectAssetPath}
-                      placeholder="Not set — uses default backend location"
-                      className="flex-1 px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-blue-500 truncate"
-                      onBlur={e => {
-                        if (currentProjectId && e.target.value !== projectAssetPath) {
-                          updateProject(currentProjectId, { assetSavePath: e.target.value.trim() || undefined })
-                        }
-                      }}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter') {
-                          const val = (e.target as HTMLInputElement).value.trim()
-                          if (currentProjectId) updateProject(currentProjectId, { assetSavePath: val || undefined })
-                        }
-                      }}
-                    />
-                    <Button
-                      variant="outline"
-                      className="border-zinc-700 flex-shrink-0"
-                      onClick={async () => {
-                        const dir = await window.electronAPI?.showOpenDirectoryDialog({ title: 'Select Asset Folder' })
-                        if (dir && currentProjectId) {
-                          updateProject(currentProjectId, { assetSavePath: dir })
-                        }
-                      }}
-                    >
-                      <Folder className="h-4 w-4" />
-                    </Button>
-                  </div>
-                  <p className="text-[10px] text-zinc-600 mt-1">Where generated video and image assets will be saved for this project</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        )
-      })()}
       
       {/* IC-LORA HIDDEN - IC-LoRA panel hidden because IC-LoRA is broken on server
       {(() => {
