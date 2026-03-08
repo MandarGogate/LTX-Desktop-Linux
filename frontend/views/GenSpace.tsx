@@ -821,6 +821,7 @@ export function GenSpace() {
     videoUrl,
     videoPath,
     imageUrls,
+    imagePaths,
     error,
     reset,
   } = useGeneration()
@@ -907,8 +908,6 @@ export function GenSpace() {
   const assets = (currentProject?.assets || []).filter(a => a.generationParams)
   const [lastPrompt, setLastPrompt] = useState('')
   
-  const assetSavePath = currentProject?.assetSavePath
-
   // When video generation completes, add to project assets
   useEffect(() => {
     if (!videoUrl || !videoPath || !currentProjectId || isGenerating) return
@@ -924,7 +923,9 @@ export function GenSpace() {
 
     ;(async () => {
       try {
-        const { path: finalPath, url: finalUrl } = await copyToAssetFolder(videoPath, videoUrl, assetSavePath)
+        const copied = await copyToAssetFolder(videoPath, currentProjectId)
+        const finalPath = copied?.path ?? videoPath
+        const finalUrl = copied?.url ?? videoUrl
         addAsset(currentProjectId, {
           type: 'video',
           path: finalPath,
@@ -959,7 +960,7 @@ export function GenSpace() {
         logger.error(`Failed to persist generated video asset: ${err}`)
       }
     })()
-  }, [videoUrl, videoPath, currentProjectId, isGenerating, applyForcedVideoSettings, settings, inputImage, inputAudio, assetSavePath, lastPrompt, addAsset, reset])
+  }, [videoUrl, videoPath, currentProjectId, isGenerating, applyForcedVideoSettings, settings, inputImage, inputAudio, lastPrompt, addAsset, reset])
 
   // When retake completes, add as take or new asset
   useEffect(() => {
@@ -971,7 +972,9 @@ export function GenSpace() {
     ;(async () => {
       const usedPrompt = submission.prompt
       const usedInput = submission.input
-      const { path: finalPath, url: finalUrl } = await copyToAssetFolder(retakeResult.videoPath, retakeResult.videoUrl, assetSavePath)
+      const copied = await copyToAssetFolder(retakeResult.videoPath, currentProjectId)
+      const finalPath = copied?.path ?? retakeResult.videoPath
+      const finalUrl = copied?.url ?? retakeResult.videoUrl
 
       if (activeRetakeSource?.assetId) {
         const sourceAsset = currentProject?.assets?.find(a => a.id === activeRetakeSource.assetId)
@@ -1021,17 +1024,21 @@ export function GenSpace() {
       setActiveRetakeSource(null)
       resetRetake()
     })()
-  }, [retakeResult, isRetaking, currentProjectId, currentProject?.assets, activeRetakeSource, addAsset, addTakeToAsset, assetSavePath, setPendingRetakeUpdate, resetRetake])
+  }, [retakeResult, isRetaking, currentProjectId, currentProject?.assets, activeRetakeSource, addAsset, addTakeToAsset, setPendingRetakeUpdate, resetRetake])
   
   // When image generation/editing completes, add all images to project assets
   useEffect(() => {
     if (imageUrls.length > 0 && currentProjectId && !isGenerating) {
       const genMode = 'text-to-image'
       ;(async () => {
-        for (const imageUrl of imageUrls) {
+        for (let i = 0; i < imageUrls.length; i++) {
+          const imageUrl = imageUrls[i]
+          const imgPath = imagePaths[i] || null
           const exists = assets.some(a => a.url === imageUrl)
           if (!exists) {
-            const { path: finalPath, url: finalUrl } = await copyToAssetFolder(imageUrl, imageUrl, assetSavePath)
+            const copied = imgPath ? await copyToAssetFolder(imgPath, currentProjectId) : null
+            const finalPath = copied?.path ?? imgPath ?? imageUrl
+            const finalUrl = copied?.url ?? imageUrl
             addAsset(currentProjectId, {
               type: 'image',
               path: finalPath,
@@ -1061,7 +1068,7 @@ export function GenSpace() {
         }
       })()
     }
-  }, [imageUrls, currentProjectId, isGenerating])
+  }, [imageUrls, imagePaths, currentProjectId, isGenerating])
   
   const handleGenerate = async () => {
     if (mode === 'retake') {

@@ -1,38 +1,25 @@
 import { logger } from './logger'
 
-function toFilesystemPath(pathOrUrl: string): string {
-  if (pathOrUrl.startsWith('file://')) {
-    let p = decodeURIComponent(pathOrUrl.slice(7))
-    if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1)
-    return p
-  }
-  return pathOrUrl
-}
-
 /**
- * Copy a generated file to the project's configured asset save folder.
- * Returns the new path + URL if successful, or the originals as fallback.
+ * Copy a generated file to the global project assets folder via a single IPC call.
+ * Electron handles path validation, directory creation, and file copy.
+ * Returns the new { path, url } if successful, or null on failure — callers handle fallback.
  */
 export async function copyToAssetFolder(
-  origPath: string,
-  origUrl: string,
-  assetSavePath: string | undefined | null,
-): Promise<{ path: string; url: string }> {
-  if (!assetSavePath || !window.electronAPI) return { path: origPath, url: origUrl }
+  srcPath: string,
+  projectId: string,
+): Promise<{ path: string; url: string } | null> {
+  if (!srcPath || !projectId || !window.electronAPI) return null
   try {
-    const fsPath = toFilesystemPath(origPath)
-    await window.electronAPI.ensureDirectory(assetSavePath)
-    const sep = fsPath.includes('\\') ? '\\' : '/'
-    const fileName = fsPath.split(sep).pop() || fsPath.split('/').pop() || 'asset'
-    const destPath = `${assetSavePath}${sep}${fileName}`
-    const result = await window.electronAPI.copyFile(fsPath, destPath)
-    if (result.success) {
-      const normalized = destPath.replace(/\\/g, '/')
-      const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
-      return { path: destPath, url: fileUrl }
+    const result = await window.electronAPI.copyToProjectAssets(srcPath, projectId)
+    if (result.success && result.path && result.url) {
+      return { path: result.path, url: result.url }
+    }
+    if (result.error) {
+      logger.warn(`Failed to copy asset to project folder: ${result.error}`)
     }
   } catch (e) {
     logger.warn(`Failed to copy asset to project folder: ${e}`)
   }
-  return { path: origPath, url: origUrl }
+  return null
 }

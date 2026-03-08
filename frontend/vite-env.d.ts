@@ -32,12 +32,13 @@ interface Window {
     openLogFolder: () => Promise<boolean>
     getResourcePath: () => Promise<string | null>
     getDownloadsPath: () => Promise<string>
-    ensureDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
+    copyToProjectAssets: (srcPath: string, projectId: string) => Promise<{ success: boolean; path?: string; url?: string; error?: string }>
+    getProjectAssetsPath: () => Promise<string>
+    setProjectAssetsPath: (newPath: string) => Promise<{ success: boolean; error?: string }>
     showSaveDialog: (options: { title?: string; defaultPath?: string; filters?: { name: string; extensions: string[] }[] }) => Promise<string | null>
     saveFile: (filePath: string, data: string, encoding?: string) => Promise<{ success: boolean; path?: string; error?: string }>
     saveBinaryFile: (filePath: string, data: ArrayBuffer) => Promise<{ success: boolean; path?: string; error?: string }>
     showOpenDirectoryDialog: (options: { title?: string }) => Promise<string | null>
-    copyFile: (src: string, dest: string) => Promise<{ success: boolean; error?: string }>
     checkFilesExist: (filePaths: string[]) => Promise<Record<string, boolean>>
     showOpenFileDialog: (options: { title?: string; filters?: { name: string; extensions: string[] }[]; properties?: string[] }) => Promise<string[] | null>
     searchDirectoryForFiles: (directory: string, filenames: string[]) => Promise<Record<string, string | null>>

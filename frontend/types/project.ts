@@ -407,7 +407,6 @@ export interface Project {
   thumbnail?: string
   timelines: Timeline[]
   activeTimelineId?: string
-  assetSavePath?: string // Folder where generated assets are saved (default: Downloads/Ltx Desktop Assets/{name})
 }
 
 export type ViewType = 'home' | 'project' | 'playground'

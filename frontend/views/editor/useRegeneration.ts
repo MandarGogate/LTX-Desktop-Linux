@@ -22,13 +22,14 @@ export interface UseRegenerationParams {
   regenVideoUrl: string | null
   regenVideoPath: string | null
   regenImageUrl: string | null
+  regenImagePath: string | null
   isRegenerating: boolean
   regenProgress: number
   regenStatusMessage: string
   regenCancel: () => void
   regenReset: () => void
   regenError: string | null
-  assetSavePath: string | undefined | null
+  projectId: string
   shouldVideoGenerateWithLtxApi: boolean
 }
 
@@ -38,11 +39,11 @@ export function useRegeneration(params: UseRegenerationParams) {
     addAsset, updateAsset, addTakeToAsset, deleteTakeFromAsset,
     resolveClipSrc,
     regenGenerate, regenGenerateImage,
-    regenVideoUrl, regenVideoPath, regenImageUrl,
+    regenVideoUrl, regenVideoPath, regenImageUrl, regenImagePath,
     isRegenerating, regenProgress, regenStatusMessage,
     regenCancel, regenReset,
     regenError,
-    assetSavePath,
+    projectId,
     shouldVideoGenerateWithLtxApi,
   } = params
 
@@ -116,7 +117,10 @@ export function useRegeneration(params: UseRegenerationParams) {
     if (!clip) { setI2vClipId(null); return }
 
       ;(async () => {
-        const { path: finalPath, url: finalUrl } = await copyToAssetFolder(regenVideoPath || regenVideoUrl, regenVideoUrl, assetSavePath)
+        const srcPath = regenVideoPath || regenVideoUrl
+        const copied = await copyToAssetFolder(srcPath, projectId)
+        const finalPath = copied?.path ?? srcPath
+        const finalUrl = copied?.url ?? regenVideoUrl
         const savedI2vSettings = shouldVideoGenerateWithLtxApi
           ? sanitizeForcedApiVideoSettings({
               ...i2vSettings,
@@ -167,7 +171,7 @@ export function useRegeneration(params: UseRegenerationParams) {
       regenReset()
     })()
 
-  }, [regenVideoUrl, isRegenerating, regenVideoPath, currentProjectId, clips, i2vClipId, i2vPrompt, i2vSettings, addAsset, setClips, regenReset, assetSavePath, shouldVideoGenerateWithLtxApi])
+  }, [regenVideoUrl, isRegenerating, regenVideoPath, currentProjectId, clips, i2vClipId, i2vPrompt, i2vSettings, addAsset, setClips, regenReset, projectId, shouldVideoGenerateWithLtxApi])
 
   // Clean up I2V state when generation fails
   useEffect(() => {
@@ -318,7 +322,9 @@ export function useRegeneration(params: UseRegenerationParams) {
   useEffect(() => {
     if (regenVideoUrl && regenVideoPath && regeneratingAssetId && currentProjectId && !isRegenerating) {
       ;(async () => {
-        const { path: finalPath, url: finalUrl } = await copyToAssetFolder(regenVideoPath, regenVideoUrl, assetSavePath)
+        const copied = await copyToAssetFolder(regenVideoPath, projectId)
+        const finalPath = copied?.path ?? regenVideoPath
+        const finalUrl = copied?.url ?? regenVideoUrl
 
         addTakeToAsset(currentProjectId, regeneratingAssetId, {
           url: finalUrl,
@@ -346,7 +352,10 @@ export function useRegeneration(params: UseRegenerationParams) {
   useEffect(() => {
     if (regenImageUrl && regeneratingAssetId && currentProjectId && !isRegenerating) {
       ;(async () => {
-        const { path: finalPath, url: finalUrl } = await copyToAssetFolder(regenImageUrl, regenImageUrl, assetSavePath)
+        const srcPath = regenImagePath || regenImageUrl
+        const copied = await copyToAssetFolder(srcPath, projectId)
+        const finalPath = copied?.path ?? srcPath
+        const finalUrl = copied?.url ?? regenImageUrl
 
         addTakeToAsset(currentProjectId, regeneratingAssetId, {
           url: finalUrl,

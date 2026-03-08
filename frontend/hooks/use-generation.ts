@@ -9,7 +9,9 @@ interface GenerationState {
   videoUrl: string | null
   videoPath: string | null  // Original file path for upscaling
   imageUrl: string | null
+  imagePath: string | null  // Original file path for first image
   imageUrls: string[]  // For multiple image variations
+  imagePaths: string[]  // Original file paths for all images
   error: string | null
 }
 
@@ -95,7 +97,9 @@ export function useGeneration(): UseGenerationReturn {
     videoUrl: null,
     videoPath: null,
     imageUrl: null,
+    imagePath: null,
     imageUrls: [],
+    imagePaths: [],
     error: null,
   })
 
@@ -118,7 +122,9 @@ export function useGeneration(): UseGenerationReturn {
       videoUrl: null,
       videoPath: null,
       imageUrl: null,
+      imagePath: null,
       imageUrls: [],
+      imagePaths: [],
       error: null,
     })
 
@@ -226,7 +232,9 @@ export function useGeneration(): UseGenerationReturn {
           videoUrl: fileUrl,
           videoPath: result.video_path,  // Keep original path for API calls
           imageUrl: null,
+          imagePath: null,
           imageUrls: [],
+          imagePaths: [],
           error: null,
         })
       } else if (result.status === 'cancelled') {
@@ -329,7 +337,9 @@ export function useGeneration(): UseGenerationReturn {
       videoUrl: null,
       videoPath: null,
       imageUrl: null,
+      imagePath: null,
       imageUrls: [],
+      imagePaths: [],
       error: null,
     })
 
@@ -418,7 +428,9 @@ export function useGeneration(): UseGenerationReturn {
             videoUrl: null,
             videoPath: null,
             imageUrl: fileUrls[0],  // First image for backwards compatibility
+            imagePath: rawPaths[0],  // First image path
             imageUrls: fileUrls,    // All images
+            imagePaths: rawPaths,   // All image paths
             error: null,
           })
         }
@@ -457,7 +469,9 @@ export function useGeneration(): UseGenerationReturn {
       videoUrl: null,
       videoPath: null,
       imageUrl: null,
+      imagePath: null,
       imageUrls: [],
+      imagePaths: [],
       error: null,
     })
   }, [])

@@ -19,12 +19,13 @@ export interface UseGapGenerationParams {
   regenVideoUrl: string | null
   regenVideoPath: string | null
   regenImageUrl: string | null
+  regenImagePath: string | null
   isRegenerating: boolean
   regenProgress: number
   regenCancel: () => void
   regenReset: () => void
   regenError: string | null
-  assetSavePath: string | undefined | null
+  projectId: string
 }
 
 export function useGapGeneration({
@@ -41,12 +42,13 @@ export function useGapGeneration({
   regenVideoUrl,
   regenVideoPath,
   regenImageUrl,
+  regenImagePath,
   isRegenerating,
   regenProgress,
   regenCancel,
   regenReset,
   regenError,
-  assetSavePath,
+  projectId,
 }: UseGapGenerationParams) {
   // Gap selection and generation
   const [selectedGap, setSelectedGap] = useState<{ trackIndex: number; startTime: number; endTime: number } | null>(null)
@@ -209,7 +211,7 @@ export function useGapGeneration({
     
     const isImageResult = generatingGap.mode === 'text-to-image'
     const origUrl = isImageResult ? regenImageUrl : regenVideoUrl
-    const origPath = regenVideoPath
+    const origPath = isImageResult ? regenImagePath : regenVideoPath
     if (!origUrl || !currentProjectId) {
       // Generation ended with no result (cancelled or failed) - clean up
       if (!isRegenerating && generatingGap) {
@@ -224,7 +226,10 @@ export function useGapGeneration({
     const type = isImageResult ? 'image' : 'video'
 
     ;(async () => {
-      const { path: finalPath, url: finalUrl } = await copyToAssetFolder(origPath || origUrl, origUrl, assetSavePath)
+      const srcPath = origPath || origUrl
+      const copied = await copyToAssetFolder(srcPath, projectId)
+      const finalPath = copied?.path ?? srcPath
+      const finalUrl = copied?.url ?? origUrl
 
       const asset = addAsset(currentProjectId, {
         type: type as 'image' | 'video',

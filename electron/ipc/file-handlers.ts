@@ -5,6 +5,7 @@ import { getAllowedRoots } from '../config'
 import { logger } from '../logger'
 import { getMainWindow } from '../window'
 import { validatePath, approvePath } from '../path-validation'
+import { getProjectAssetsPath, setProjectAssetsPath } from '../app-state'
 
 const MIME_TYPES: Record<string, string> = {
   '.png': 'image/png',
@@ -165,13 +166,31 @@ export function registerFileHandlers(): void {
     return searchDirectoryForFiles(dir, filenames)
   })
 
-  ipcMain.handle('copy-file', async (_event, src: string, dest: string) => {
+  ipcMain.handle('copy-to-project-assets', async (_event, srcPath: string, projectId: string) => {
     try {
-      validatePath(src, getAllowedRoots())
-      validatePath(dest, getAllowedRoots())
-      const dir = path.dirname(dest)
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-      fs.copyFileSync(src, dest)
+      const resolvedSrc = validatePath(srcPath, getAllowedRoots())
+      const assetsRoot = getProjectAssetsPath()
+      const destDir = path.join(assetsRoot, projectId)
+      fs.mkdirSync(destDir, { recursive: true })
+      const fileName = path.basename(resolvedSrc)
+      const destPath = path.join(destDir, fileName)
+      fs.copyFileSync(resolvedSrc, destPath)
+      const normalized = destPath.replace(/\\/g, '/')
+      const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
+      return { success: true, path: destPath, url: fileUrl }
+    } catch (error) {
+      logger.error(`Error copying to project assets: ${error}`)
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('get-project-assets-path', async () => {
+    return getProjectAssetsPath()
+  })
+
+  ipcMain.handle('set-project-assets-path', async (_event, newPath: string) => {
+    try {
+      setProjectAssetsPath(newPath)
       return { success: true }
     } catch (error) {
       return { success: false, error: String(error) }
@@ -211,15 +230,4 @@ export function registerFileHandlers(): void {
     return result.filePaths
   })
 
-  ipcMain.handle('ensure-directory', async (_event, dirPath: string) => {
-    try {
-      validatePath(dirPath, getAllowedRoots())
-      if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true })
-      }
-      return { success: true }
-    } catch (error) {
-      return { success: false, error: String(error) }
-    }
-  })
 }
