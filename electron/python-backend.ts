@@ -221,6 +221,7 @@ export async function startPythonBackend(): Promise<void> {
       env: {
         ...process.env,
         PYTHONUNBUFFERED: '1',
+        PYTHONNOUSERSITE: '1',
         LTX_PORT: String(PYTHON_PORT),
         LTX_APP_DATA_DIR: getAppDataDir(),
         PYTORCH_ENABLE_MPS_FALLBACK: '1',
