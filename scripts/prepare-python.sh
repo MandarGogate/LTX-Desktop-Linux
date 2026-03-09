@@ -262,7 +262,7 @@ except ImportError as e:
 
 # Calculate size
 SIZE_BYTES=$(du -sb "$OUTPUT_PATH" 2>/dev/null | cut -f1 || du -sk "$OUTPUT_PATH" | awk '{print $1 * 1024}')
-SIZE_GB=$(echo "scale=2; $SIZE_BYTES / 1073741824" | bc)
+SIZE_GB=$(awk "BEGIN {printf \"%.2f\", $SIZE_BYTES / 1073741824}")
 
 echo ""
 echo "========================================"
