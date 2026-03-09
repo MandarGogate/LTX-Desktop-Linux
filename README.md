@@ -1,6 +1,6 @@
 # LTX Desktop
 
-LTX Desktop is an open-source desktop app for generating videos with LTX models — locally on supported Windows NVIDIA GPUs, with an API mode for unsupported hardware and macOS.
+LTX Desktop is an open-source desktop app for generating videos with LTX models — locally on supported Windows/Linux NVIDIA GPUs, with an API mode for unsupported hardware and macOS.
 
 > **Status: Beta.** Expect breaking changes.
 > Frontend architecture is under active refactor; large UI PRs may be declined for now (see [`CONTRIBUTING.md`](docs/CONTRIBUTING.md)).
@@ -32,8 +32,9 @@ LTX Desktop is an open-source desktop app for generating videos with LTX models 
 | --- | --- | --- |
 | Windows + CUDA GPU with **≥32GB VRAM** | Local generation | Downloads model weights locally |
 | Windows (no CUDA, <32GB VRAM, or unknown VRAM) | API-only | **LTX API key required** |
+| Linux + CUDA GPU with **≥32GB VRAM** | Local generation | Downloads model weights locally |
+| Linux (no CUDA, <32GB VRAM, or unknown VRAM) | API-only | **LTX API key required** |
 | macOS (Apple Silicon builds) | API-only | **LTX API key required** |
-| Linux | Not officially supported | No official builds |
 
 In API-only mode, available resolutions/durations may be limited to what the API supports.
 
@@ -45,6 +46,14 @@ In API-only mode, available resolutions/durations may be limited to what the API
 - NVIDIA GPU with CUDA support and **≥32GB VRAM** (more is better)
 - 16GB+ RAM (32GB recommended)
 - **160GB+ free disk space** (for model weights, Python environment, and outputs)
+
+### Linux (local generation)
+
+- Ubuntu 22.04+ or similar distro (x64)
+- NVIDIA GPU with CUDA support and **≥32GB VRAM** (more is better)
+- NVIDIA driver installed (PyTorch bundles the CUDA runtime)
+- 16GB+ RAM (32GB recommended)
+- Plenty of free disk space for model weights and outputs
 
 ### macOS (API-only)
 
@@ -64,6 +73,7 @@ LTX Desktop stores app data (settings, models, logs) in:
 
 - **Windows:** `%LOCALAPPDATA%\LTXDesktop\`
 - **macOS:** `~/Library/Application Support/LTXDesktop/`
+- **Linux:** `$XDG_DATA_HOME/LTXDesktop/` (default: `~/.local/share/LTXDesktop/`)
 
 Model weights are downloaded into the `models/` subfolder (this can be large and may take time).
 
@@ -84,7 +94,7 @@ The LTX API is used for:
 - API-based video generations (required on macOS and on unsupported Windows hardware) — paid
 - Retake — paid
 
-An LTX API key is required in API-only mode, but optional on Windows local mode if you enable the Local Text Encoder.
+An LTX API key is required in API-only mode, but optional on Windows/Linux local mode if you enable the Local Text Encoder.
 
 Generate a FREE API key at the [LTX Console](https://console.ltx.video/). Text encoding is free; video generation API usage is paid. [Read more](https://ltx.io/model/model-blog/ltx-2-better-control-for-real-workflows).
 
@@ -137,11 +147,7 @@ Prereqs:
 Setup:
 
 ```bash
-# macOS
-pnpm setup:dev:mac
-
-# Windows
-pnpm setup:dev:win
+pnpm setup:dev
 ```
 
 Run:

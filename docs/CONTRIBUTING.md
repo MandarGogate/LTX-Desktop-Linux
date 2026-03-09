@@ -14,11 +14,7 @@ Prereqs:
 Setup:
 
 ```bash
-# macOS
-pnpm setup:dev:mac
-
-# Windows
-pnpm setup:dev:win
+pnpm setup:dev
 ```
 
 Run:

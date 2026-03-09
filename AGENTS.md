@@ -21,8 +21,8 @@ LTX Desktop is an Electron app for AI video generation using LTX models. Three-l
 | `pnpm typecheck:py` | Python pyright only |
 | `pnpm backend:test` | Run Python pytest tests |
 | `pnpm build:frontend` | Vite frontend build only |
-| `pnpm build:mac` / `pnpm build:win` | Full platform builds |
-| `pnpm setup:dev:mac` / `pnpm setup:dev:win` | One-time dev environment setup |
+| `pnpm build` | Full platform build (auto-detects platform) |
+| `pnpm setup:dev` | One-time dev environment setup (auto-detects platform) |
 
 Run a single backend test file via pnpm: `pnpm backend:test -- tests/test_ic_lora.py`
 

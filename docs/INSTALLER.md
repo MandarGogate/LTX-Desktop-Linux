@@ -10,7 +10,7 @@ This guide explains how to build a distributable installer for **LTX Desktop**.
 The installer includes:
 - **Electron app** (React frontend + Electron shell)
 - **Embedded Python** (version from [`backend/.python-version`](../backend/.python-version)) with all dependencies pre-installed:
-  - PyTorch (CUDA on Windows, MPS on macOS)
+  - PyTorch (CUDA on Windows/Linux, MPS on macOS)
   - FastAPI, Diffusers, Transformers
   - LTX-2 inference packages
   - All other required libraries
@@ -18,6 +18,7 @@ The installer includes:
 
 **NOT bundled** (downloaded at runtime):
 - Model weights (downloaded on first run; can be large) from Hugging Face
+- On **Linux** and **Windows**: the Python environment itself is downloaded on first launch (keeps installer small)
 
 The embedded Python is **fully isolated** from the target system's Python — it lives inside `{install_dir}/resources/python/` and never modifies system settings.
 
@@ -35,67 +36,43 @@ Before building, ensure you have:
 
 - **Windows**: PowerShell 5.1+ (comes with Windows 10/11)
 - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+- **Linux**: `build-essential` (or equivalent) for native extensions
 
 ## Quick Build
 
-### macOS
 ```bash
-pnpm build:mac
+pnpm build
 ```
 
-### Windows
-```powershell
-pnpm build:win
-```
-
-This will:
+This auto-detects your platform and will:
 1. Download a standalone Python distribution (version from [`backend/.python-version`](../backend/.python-version))
-2. Install all Python dependencies (~10GB on Windows with CUDA, ~2-3GB on macOS with MPS)
+2. Install all Python dependencies (~10GB on Windows/Linux with CUDA, ~2-3GB on macOS with MPS)
 3. Build the frontend
 4. Package everything with electron-builder
-5. Create a DMG (macOS) or NSIS installer (Windows) in the `release/` folder
+5. Create a DMG (macOS), AppImage + deb (Linux), or NSIS installer (Windows) in the `release/` folder
 
 ## Build Options
 
-### macOS
-
 ```bash
 # Full build
-pnpm build:mac
+pnpm build
 
 # Skip Python setup (if already prepared)
-pnpm build:mac:skip-python
+pnpm build:skip-python
 
 # Fast rebuild (unpacked, skip Python + pnpm install)
-pnpm build:fast:mac
+pnpm build:fast
 
 # Just prepare Python environment
-pnpm prepare:python:mac
+pnpm prepare:python
 ```
 
-### Windows
-
-```powershell
-# Full build
-pnpm build:win
-
-# Skip Python setup (if already prepared)
-pnpm build:win:skip-python
-
-# Just prepare Python environment
-pnpm prepare:python:win
-
-# Fast rebuild (unpacked, skip Python + pnpm install)
-pnpm build:fast:win
-
-# Clean build
-powershell -File scripts/local-build.ps1 -Clean
-```
+All commands auto-detect the current platform (macOS, Linux, or Windows).
 
 ### Build Script Options
 
-The `local-build.sh` script accepts:
-- `--platform mac|win` — Target platform (auto-detected if omitted)
+The underlying `local-build.sh` / `local-build.ps1` scripts also accept:
+- `--platform mac|linux|win` — Target platform (auto-detected if omitted)
 - `--skip-python` — Use existing `python-embed/` directory
 - `--clean` — Remove build artifacts before starting
 - `--unpack` — Build unpacked app only (faster, no installer/DMG)
@@ -108,6 +85,13 @@ release/
   └── LTX Desktop-<version>-arm64.dmg
 ```
 
+### Linux
+```
+release/
+  ├── LTX Desktop-x86_64.AppImage
+  └── LTX Desktop-amd64.deb
+```
+
 ### Windows
 ```
 release/
@@ -118,7 +102,7 @@ release/
 
 Place icon files in `resources/` before building:
 - `icon.ico` — Windows (multi-size ICO: 256x256, 128x128, 64x64, 48x48, 32x32, 16x16)
-- `icon.png` — macOS (1024x1024 recommended)
+- `icon.png` — macOS and Linux (1024x1024 recommended)
 
 ## Troubleshooting
 
@@ -137,6 +121,7 @@ xattr -dr com.apple.quarantine /Applications/LTX\ Desktop.app
 ### Installer is too large
 Expected installer sizes (does not include model weights):
 - **Windows**: ~10GB (PyTorch CUDA ~2.5GB + ML libraries ~5GB + Python ~200MB + Electron ~100MB)
+- **Linux**: ~10GB (similar to Windows; PyTorch CUDA variant)
 - **macOS**: ~2-3GB (PyTorch MPS is much smaller than CUDA variant)
 
 ### Runtime / first-run issues
@@ -160,6 +145,24 @@ npx electron-builder --mac
 
 # Or build unpacked app (faster, for testing)
 npx electron-builder --mac --dir
+```
+
+### Linux
+```bash
+# 1. Prepare Python environment
+bash scripts/prepare-python.sh
+
+# 2. Install dependencies
+pnpm install
+
+# 3. Build frontend
+pnpm build:frontend
+
+# 4. Build AppImage + deb
+npx electron-builder --linux
+
+# Or build unpacked app (faster, for testing)
+npx electron-builder --linux --dir
 ```
 
 ### Windows
