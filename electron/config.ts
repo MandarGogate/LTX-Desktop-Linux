@@ -3,8 +3,6 @@ import path from 'path'
 import os from 'os'
 import { getProjectAssetsPath } from './app-state'
 
-export const PYTHON_PORT = 8000
-export const BACKEND_BASE_URL = `http://localhost:${PYTHON_PORT}`
 export const isDev = !app.isPackaged
 
 // Get directory - works in both CJS and ESM contexts
