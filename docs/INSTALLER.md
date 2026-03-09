@@ -141,10 +141,10 @@ pnpm install
 pnpm build:frontend
 
 # 4. Build DMG
-npx electron-builder --mac
+pnpm exec electron-builder --mac
 
 # Or build unpacked app (faster, for testing)
-npx electron-builder --mac --dir
+pnpm exec electron-builder --mac --dir
 ```
 
 ### Linux
@@ -159,10 +159,10 @@ pnpm install
 pnpm build:frontend
 
 # 4. Build AppImage + deb
-npx electron-builder --linux
+pnpm exec electron-builder --linux
 
 # Or build unpacked app (faster, for testing)
-npx electron-builder --linux --dir
+pnpm exec electron-builder --linux --dir
 ```
 
 ### Windows
@@ -177,5 +177,5 @@ pnpm install
 pnpm build:frontend
 
 # 4. Build installer
-npx electron-builder --win
+pnpm exec electron-builder --win
 ```
