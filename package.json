@@ -4,7 +4,11 @@
   "description": "LTX-2 Video Generation - Desktop App",
   "type": "module",
   "main": "dist-electron/main.js",
-  "author": "Lightricks",
+  "author": {
+    "name": "Lightricks",
+    "email": "ltx-desktop-dev@lightricks.com"
+  },
+  "homepage": "https://github.com/Lightricks/LTX-Desktop",
   "license": "Apache-2.0",
   "private": true,
   "packageManager": "pnpm@10.30.3",
