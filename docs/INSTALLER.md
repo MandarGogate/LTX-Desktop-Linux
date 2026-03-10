@@ -89,7 +89,9 @@ release/
 ```
 release/
   ├── LTX Desktop-x86_64.AppImage
-  └── LTX Desktop-amd64.deb
+  ├── LTX Desktop-amd64.deb
+  ├── LTX Desktop-arm64.AppImage
+  └── LTX Desktop-arm64.deb
 ```
 
 ### Windows
