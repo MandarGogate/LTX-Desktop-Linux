@@ -49,7 +49,7 @@ In API-only mode, available resolutions/durations may be limited to what the API
 
 ### Linux (local generation)
 
-- Ubuntu 22.04+ or similar distro (x64)
+- Ubuntu 22.04+ or similar distro (x64 or arm64)
 - NVIDIA GPU with CUDA support and **≥32GB VRAM** (more is better)
 - NVIDIA driver installed (PyTorch bundles the CUDA runtime)
 - 16GB+ RAM (32GB recommended)

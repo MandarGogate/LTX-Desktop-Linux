@@ -247,6 +247,7 @@ function getPythonArchivePrefix(): string {
   if (process.platform === 'win32') return 'python-embed-win32'
   if (process.platform === 'linux') {
     if (process.arch === 'x64') return 'python-embed-linux-x64'
+    if (process.arch === 'arm64') return 'python-embed-linux-arm64'
     throw new Error(`Unsupported Linux architecture: ${process.arch}`)
   }
   throw new Error(`Python download is not supported on ${process.platform}`)

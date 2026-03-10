@@ -117,7 +117,9 @@ if [ "$UNPACK" = true ]; then
     linux)
       echo ""
       echo "Unpacked app ready!"
-      echo "Run: $RELEASE_DIR/linux-unpacked/ltx-desktop"
+      LINUX_UNPACKED="$RELEASE_DIR/linux-unpacked"
+      [ -d "$RELEASE_DIR/linux-arm64-unpacked" ] && LINUX_UNPACKED="$RELEASE_DIR/linux-arm64-unpacked"
+      echo "Run: $LINUX_UNPACKED/ltx-desktop"
       ;;
   esac
 else
