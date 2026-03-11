@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
-
-import torch
 
 from handlers.base import StateHandlerBase
 from handlers.text_handler import TextHandler
@@ -52,10 +49,8 @@ class PipelinesHandler(StateHandlerBase):
         a2v_pipeline_class: type[A2VPipeline],
         retake_pipeline_class: type[RetakePipeline],
         config: RuntimeConfig,
-        outputs_dir: Path,
-        device: torch.device,
     ) -> None:
-        super().__init__(state, lock)
+        super().__init__(state, lock, config)
         self._text_handler = text_handler
         self._gpu_cleaner = gpu_cleaner
         self._fast_video_pipeline_class = fast_video_pipeline_class
@@ -63,10 +58,7 @@ class PipelinesHandler(StateHandlerBase):
         self._ic_lora_pipeline_class = ic_lora_pipeline_class
         self._a2v_pipeline_class = a2v_pipeline_class
         self._retake_pipeline_class = retake_pipeline_class
-        self._config = config
-        self._outputs_dir = outputs_dir
-        self._device = device
-        self._runtime_device = get_device_type(device)
+        self._runtime_device = get_device_type(self.config.device)
 
     def _ensure_no_running_generation(self) -> None:
         match self.state.gpu_slot:
@@ -120,14 +112,14 @@ class PipelinesHandler(StateHandlerBase):
     def _create_video_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
         gemma_root = self._text_handler.resolve_gemma_root()
 
-        checkpoint_path = str(self._config.model_path("checkpoint"))
-        upsampler_path = str(self._config.model_path("upsampler"))
+        checkpoint_path = str(self.config.model_path("checkpoint"))
+        upsampler_path = str(self.config.model_path("upsampler"))
 
         pipeline = self._fast_video_pipeline_class.create(
             checkpoint_path,
             gemma_root,
             upsampler_path,
-            self._device,
+            self.config.device,
         )
 
         state = VideoPipelineState(
@@ -189,7 +181,7 @@ class PipelinesHandler(StateHandlerBase):
                     zit_service = None
 
         if zit_service is None:
-            zit_path = self._config.model_path("zit")
+            zit_path = self.config.model_path("zit")
             if not (zit_path.exists() and any(zit_path.iterdir())):
                 raise RuntimeError("Z-Image-Turbo model not downloaded. Please download the AI models first using the Model Status menu.")
             zit_service = self._image_generation_pipeline_class.create(str(zit_path), self._runtime_device)
@@ -212,7 +204,7 @@ class PipelinesHandler(StateHandlerBase):
                 case _:
                     pass
 
-        zit_path = self._config.model_path("zit")
+        zit_path = self.config.model_path("zit")
         if not (zit_path.exists() and any(zit_path.iterdir())):
             raise RuntimeError("Z-Image-Turbo model not downloaded. Please download the AI models first using the Model Status menu.")
 
@@ -289,11 +281,11 @@ class PipelinesHandler(StateHandlerBase):
         self._evict_gpu_pipeline_for_swap()
 
         pipeline = self._ic_lora_pipeline_class.create(
-            str(self._config.model_path("checkpoint")),
+            str(self.config.model_path("checkpoint")),
             self._text_handler.resolve_gemma_root(),
-            str(self._config.model_path("upsampler")),
+            str(self.config.model_path("upsampler")),
             lora_path,
-            self._device,
+            self.config.device,
         )
         state = ICLoraState(pipeline=pipeline, lora_path=lora_path)
 
@@ -315,10 +307,10 @@ class PipelinesHandler(StateHandlerBase):
         self._evict_gpu_pipeline_for_swap()
 
         pipeline = self._a2v_pipeline_class.create(
-            str(self._config.model_path("checkpoint")),
+            str(self.config.model_path("checkpoint")),
             self._text_handler.resolve_gemma_root(),
-            str(self._config.model_path("upsampler")),
-            self._device,
+            str(self.config.model_path("upsampler")),
+            self.config.device,
         )
         state = A2VPipelineState(pipeline=pipeline)
 
@@ -330,7 +322,7 @@ class PipelinesHandler(StateHandlerBase):
     def load_retake_pipeline(self, *, distilled: bool = True) -> RetakePipelineState:
         self._install_text_patches_if_needed()
 
-        quantized = device_supports_fp8(self._device)
+        quantized = device_supports_fp8(self.config.device)
 
         with self._lock:
             match self.state.gpu_slot:
@@ -347,9 +339,9 @@ class PipelinesHandler(StateHandlerBase):
 
         quantization = QuantizationPolicy.fp8_cast() if quantized else None
         pipeline = self._retake_pipeline_class.create(
-            checkpoint_path=str(self._config.model_path("checkpoint")),
+            checkpoint_path=str(self.config.model_path("checkpoint")),
             gemma_root=self._text_handler.resolve_gemma_root(),
-            device=self._device,
+            device=self.config.device,
             loras=[],
             quantization=quantization,
         )
@@ -362,5 +354,5 @@ class PipelinesHandler(StateHandlerBase):
 
     def warmup_pipeline(self, model_type: VideoPipelineModelType) -> None:
         state = self.load_gpu_pipeline(model_type, should_warm=False)
-        warmup_path = self._outputs_dir / f"_warmup_{model_type}.mp4"
+        warmup_path = self.config.outputs_dir / f"_warmup_{model_type}.mp4"
         state.pipeline.warmup(output_path=str(warmup_path))

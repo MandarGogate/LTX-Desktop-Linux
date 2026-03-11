@@ -26,14 +26,11 @@ class HealthHandler(StateHandlerBase):
         pipelines_handler: PipelinesHandler,
         gpu_info: GpuInfo,
         config: RuntimeConfig,
-        use_sage_attention: bool,
     ) -> None:
-        super().__init__(state, lock)
+        super().__init__(state, lock, config)
         self._models = models_handler
         self._pipelines = pipelines_handler
         self._gpu_info = gpu_info
-        self._config = config
-        self._use_sage_attention = use_sage_attention
 
     def get_health(self) -> HealthResponse:
         active_model: str | None = None
@@ -54,7 +51,7 @@ class HealthHandler(StateHandlerBase):
             models_loaded=models_loaded,
             active_model=active_model,
             gpu_info=GpuTelemetry(**self._gpu_info.get_gpu_info()),
-            sage_attention=self._use_sage_attention,
+            sage_attention=self.config.use_sage_attention,
             models_status=[
                 ModelStatusItem(
                     id="fast",
@@ -103,7 +100,7 @@ class HealthHandler(StateHandlerBase):
                 self.set_startup_ready()
                 return
 
-            if self._config.force_api_generations:
+            if self.config.force_api_generations:
                 self.set_startup_ready()
                 return
 
@@ -119,7 +116,7 @@ class HealthHandler(StateHandlerBase):
                     case _:
                         pass
 
-            zit_models_path = self._config.model_path("zit")
+            zit_models_path = self.config.model_path("zit")
             zit_exists = zit_models_path.exists() and any(zit_models_path.iterdir())
             if zit_exists:
                 self.set_startup_loading("Preloading Z-Image-Turbo to CPU", 85)

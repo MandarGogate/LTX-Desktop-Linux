@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import logging
 from threading import RLock
+from typing import TYPE_CHECKING
 
 from api_types import (
     SuggestGapPromptRequest,
@@ -16,6 +17,9 @@ from pydantic import BaseModel, Field, ValidationError
 from server_utils.media_validation import normalize_optional_path, validate_image_file
 from services.interfaces import HTTPClient, HttpTimeoutError, JSONValue
 from state.app_state_types import AppState
+
+if TYPE_CHECKING:
+    from runtime_config.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +66,8 @@ def _read_image_file_as_base64(file_path: str | None) -> str | None:
 
 
 class SuggestGapPromptHandler(StateHandlerBase):
-    def __init__(self, state: AppState, lock: RLock, http: HTTPClient) -> None:
-        super().__init__(state, lock)
+    def __init__(self, state: AppState, lock: RLock, config: RuntimeConfig, http: HTTPClient) -> None:
+        super().__init__(state, lock, config)
         self._http = http
 
     def suggest_gap(self, req: SuggestGapPromptRequest) -> SuggestGapPromptResponse:

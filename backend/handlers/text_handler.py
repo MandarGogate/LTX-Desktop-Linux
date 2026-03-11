@@ -14,8 +14,7 @@ if TYPE_CHECKING:
 
 class TextHandler(StateHandlerBase):
     def __init__(self, state: AppState, lock: RLock, config: RuntimeConfig) -> None:
-        super().__init__(state, lock)
-        self._config = config
+        super().__init__(state, lock, config)
 
     @with_state_lock
     def _get_cached_prompt(self, prompt: str, enhance_prompt: bool) -> TextEncodingResult | None:
@@ -59,7 +58,7 @@ class TextHandler(StateHandlerBase):
         """
         settings = self.state.app_settings.model_copy(deep=True)
         api_available = bool(settings.ltx_api_key)
-        text_encoder_dir = self._config.model_path("text_encoder")
+        text_encoder_dir = self.config.model_path("text_encoder")
         local_available = text_encoder_dir.exists() and any(text_encoder_dir.iterdir())
 
         if api_available and local_available:
@@ -75,7 +74,7 @@ class TextHandler(StateHandlerBase):
         """
         settings = self.state.app_settings.model_copy(deep=True)
         api_available = bool(settings.ltx_api_key)
-        text_encoder_dir = self._config.model_path("text_encoder")
+        text_encoder_dir = self.config.model_path("text_encoder")
         local_available = text_encoder_dir.exists() and any(text_encoder_dir.iterdir())
 
         if not api_available and not local_available:
@@ -97,7 +96,7 @@ class TextHandler(StateHandlerBase):
     def resolve_gemma_root(self) -> str | None:
         if not self.should_use_local_encoding():
             return None
-        text_encoder_dir = self._config.model_path("text_encoder")
+        text_encoder_dir = self.config.model_path("text_encoder")
         return str(text_encoder_dir)
 
     def _prepare_api_embeddings(self, prompt: str, enhance_prompt: bool) -> TextEncodingResult | None:
@@ -122,7 +121,7 @@ class TextHandler(StateHandlerBase):
         encoded = te.service.encode_via_api(
             prompt=prompt,
             api_key=settings.ltx_api_key,
-            checkpoint_path=str(self._config.model_path("checkpoint")),
+            checkpoint_path=str(self.config.model_path("checkpoint")),
             enhance_prompt=enhance_prompt,
         )
         if encoded is not None:

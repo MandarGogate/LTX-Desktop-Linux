@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from threading import RLock
+from typing import TYPE_CHECKING
 
 from state.app_settings import AppSettings, UpdateSettingsRequest
 from handlers._settings_utils import (
@@ -18,19 +18,22 @@ from handlers._settings_utils import (
 from handlers.base import StateHandlerBase, with_state_lock
 from state.app_state_types import AppState
 
+if TYPE_CHECKING:
+    from runtime_config.runtime_config import RuntimeConfig
+
 logger = logging.getLogger(__name__)
 
 
 class SettingsHandler(StateHandlerBase):
-    def __init__(self, state: AppState, lock: RLock, settings_file: Path) -> None:
-        super().__init__(state, lock)
-        self._settings_file = settings_file
+    def __init__(self, state: AppState, lock: RLock, config: RuntimeConfig) -> None:
+        super().__init__(state, lock, config)
 
     @with_state_lock
     def load_settings(self, default_settings: AppSettings) -> AppSettings:
-        if self._settings_file.exists():
+        settings_file = self.config.settings_file
+        if settings_file.exists():
             try:
-                with open(self._settings_file, "r", encoding="utf-8") as f:
+                with open(settings_file, "r", encoding="utf-8") as f:
                     payload = json.load(f)
                 migrated = migrate_legacy_settings(ensure_json_object(payload))
                 merged = deep_merge_dicts(
@@ -38,7 +41,7 @@ class SettingsHandler(StateHandlerBase):
                     migrated,
                 )
                 loaded = AppSettings.model_validate(merged)
-                logger.info("Settings loaded from %s", self._settings_file)
+                logger.info("Settings loaded from %s", settings_file)
                 self.state.app_settings = loaded
                 return loaded
             except Exception as exc:
@@ -50,7 +53,7 @@ class SettingsHandler(StateHandlerBase):
     def save_settings(self) -> None:
         try:
             payload = self.get_settings_snapshot().model_dump(by_alias=False)
-            with open(self._settings_file, "w", encoding="utf-8") as f:
+            with open(self.config.settings_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
         except Exception as exc:
             logger.warning("Could not save settings: %s", exc, exc_info=True)

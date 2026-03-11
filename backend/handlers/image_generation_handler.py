@@ -31,15 +31,12 @@ class ImageGenerationHandler(StateHandlerBase):
         lock: RLock,
         generation_handler: GenerationHandler,
         pipelines_handler: PipelinesHandler,
-        outputs_dir: Path,
         config: RuntimeConfig,
         zit_api_client: ZitAPIClient,
     ) -> None:
-        super().__init__(state, lock)
+        super().__init__(state, lock, config)
         self._generation = generation_handler
         self._pipelines = pipelines_handler
-        self._outputs_dir = outputs_dir
-        self._config = config
         self._zit_api_client = zit_api_client
 
     def generate(self, req: GenerateImageRequest) -> GenerateImageResponse:
@@ -58,7 +55,7 @@ class ImageGenerationHandler(StateHandlerBase):
         else:
             seed = int(time.time()) % 2147483647
 
-        if self._config.force_api_generations:
+        if self.config.force_api_generations:
             return self._generate_via_api(
                 prompt=req.prompt,
                 width=width,
@@ -126,7 +123,7 @@ class ImageGenerationHandler(StateHandlerBase):
                 seed=seed + i,
             )
 
-            output_path = self._outputs_dir / f"zit_image_{timestamp}_{uuid.uuid4().hex[:8]}.png"
+            output_path = self.config.outputs_dir / f"zit_image_{timestamp}_{uuid.uuid4().hex[:8]}.png"
             result.images[0].save(str(output_path))
             outputs.append(str(output_path))
 
@@ -179,7 +176,7 @@ class ImageGenerationHandler(StateHandlerBase):
                 download_progress = 75 + int(((idx + 1) / num_images) * 20)
                 self._generation.update_progress("downloading_output", download_progress, None, None)
 
-                output_path = self._outputs_dir / f"zit_api_image_{timestamp}_{uuid.uuid4().hex[:8]}.png"
+                output_path = self.config.outputs_dir / f"zit_api_image_{timestamp}_{uuid.uuid4().hex[:8]}.png"
                 output_path.write_bytes(image_bytes)
                 output_paths.append(output_path)
 
