@@ -9,7 +9,7 @@ from typing import Any, ClassVar
 
 from PIL import Image
 from api_types import ImageConditioningInput, VideoCameraMotion
-from services.interfaces import IcLoraDownloadPayload, IcLoraModelPayload, VideoInfoPayload
+from services.interfaces import VideoInfoPayload
 from services.ltx_api_client.ltx_api_client import LTXRetakeResult
 from tests.fakes.fake_gpu_info import FakeGpuInfo
 
@@ -306,14 +306,14 @@ class FakeModelDownloader:
         repo_id: str,
         filename: str,
         local_dir: str,
-        on_progress: Callable[[int, int], None] | None = None,
+        on_progress: Callable[[int], None] | None = None,
     ) -> Path:
         self._raise_if_needed()
         self.calls.append({"kind": "file", "repo_id": repo_id, "filename": filename, "local_dir": local_dir, "on_progress": on_progress})
 
         if on_progress is not None:
-            on_progress(512, 1024)
-            on_progress(1024, 1024)
+            on_progress(512)
+            on_progress(1024)
 
         destination = Path(local_dir) / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -324,7 +324,7 @@ class FakeModelDownloader:
         self,
         repo_id: str,
         local_dir: str,
-        on_progress: Callable[[int, int], None] | None = None,
+        on_progress: Callable[[int], None] | None = None,
     ) -> Path:
         self._raise_if_needed()
         self.calls.append(
@@ -337,8 +337,8 @@ class FakeModelDownloader:
         )
 
         if on_progress is not None:
-            on_progress(512, 1024)
-            on_progress(1024, 1024)
+            on_progress(512)
+            on_progress(1024)
 
         root = Path(local_dir)
         root.mkdir(parents=True, exist_ok=True)
@@ -400,11 +400,13 @@ class FakeVideoProcessor:
     def __init__(self) -> None:
         self.videos: dict[str, FakeCapture] = {}
         self.writers: list[FakeWriter] = []
+        self.open_video_calls: list[str] = []
 
     def register_video(self, path: str, capture: FakeCapture) -> None:
         self.videos[path] = capture
 
     def open_video(self, path: str) -> FakeCapture:
+        self.open_video_calls.append(path)
         return self.videos.setdefault(path, FakeCapture())
 
     def get_video_info(self, cap: FakeCapture) -> VideoInfoPayload:
@@ -427,8 +429,11 @@ class FakeVideoProcessor:
     def apply_canny(self, frame: Any) -> Any:
         return f"canny:{frame}"
 
-    def apply_depth(self, frame: Any) -> Any:
-        return f"depth:{frame}"
+    def apply_depth(self, frame: Any, depth_pipeline: Any) -> Any:
+        return depth_pipeline.apply(frame)
+
+    def apply_pose(self, frame: Any, pose_pipeline: Any) -> Any:
+        return pose_pipeline.apply(frame)
 
     def encode_frame_jpeg(self, frame: Any, quality: int = 85) -> bytes:  # noqa: ARG002
         return f"jpeg:{frame}".encode("utf-8")
@@ -592,6 +597,59 @@ class FakeIcLoraPipeline:
         output_path.write_bytes(b"fake-ic-lora-video")
 
 
+class FakeDepthProcessorPipeline:
+    _singleton: ClassVar["FakeDepthProcessorPipeline | None"] = None
+
+    @classmethod
+    def bind_singleton(cls, pipeline: "FakeDepthProcessorPipeline") -> None:
+        cls._singleton = pipeline
+
+    @staticmethod
+    def create(
+        model_path: str,
+        device: str | object,
+    ) -> "FakeDepthProcessorPipeline":
+        del model_path, device
+        pipeline = FakeDepthProcessorPipeline._singleton
+        if pipeline is None:
+            raise RuntimeError("FakeDepthProcessorPipeline singleton is not bound")
+        return pipeline
+
+    def __init__(self) -> None:
+        self.apply_calls: list[Any] = []
+
+    def apply(self, frame: Any) -> Any:
+        self.apply_calls.append(frame)
+        return f"depth:{frame}"
+
+
+class FakePoseProcessorPipeline:
+    _singleton: ClassVar["FakePoseProcessorPipeline | None"] = None
+
+    @classmethod
+    def bind_singleton(cls, pipeline: "FakePoseProcessorPipeline") -> None:
+        cls._singleton = pipeline
+
+    @staticmethod
+    def create(
+        pose_model_path: str,
+        person_detector_model_path: str,
+        device: str | object,
+    ) -> "FakePoseProcessorPipeline":
+        del pose_model_path, person_detector_model_path, device
+        pipeline = FakePoseProcessorPipeline._singleton
+        if pipeline is None:
+            raise RuntimeError("FakePoseProcessorPipeline singleton is not bound")
+        return pipeline
+
+    def __init__(self) -> None:
+        self.apply_calls: list[Any] = []
+
+    def apply(self, frame: Any) -> Any:
+        self.apply_calls.append(frame)
+        return f"pose:{frame}"
+
+
 class FakeA2VPipeline:
     _singleton: ClassVar["FakeA2VPipeline | None"] = None
 
@@ -662,64 +720,6 @@ class FakeRetakePipeline:
         output_path.write_bytes(b"fake-retake-video")
 
 
-class FakeIcLoraModelDownloader:
-    _MODEL_FILES = {
-        "canny": "ltx-2-19b-ic-lora-canny-control.safetensors",
-        "depth": "ltx-2-19b-ic-lora-depth-control.safetensors",
-        "pose": "ltx-2-19b-ic-lora-pose-control.safetensors",
-        "detailer": "ltx-2-19b-ic-lora-detailer.safetensors",
-    }
-
-    def __init__(self) -> None:
-        self.download_calls: list[str] = []
-        self.fail_next: Exception | None = None
-
-    def list_models(self, directory: Path) -> list[IcLoraModelPayload]:
-        if not directory.exists():
-            return []
-
-        models: list[IcLoraModelPayload] = []
-        for file_path in sorted(directory.iterdir()):
-            if file_path.suffix != ".safetensors" or not file_path.is_file():
-                continue
-            models.append(
-                {
-                    "name": file_path.stem,
-                    "path": str(file_path),
-                    "conditioning_type": "unknown",
-                    "reference_downscale_factor": 1,
-                }
-            )
-        return models
-
-    def download_model(self, model_name: str, directory: Path) -> IcLoraDownloadPayload:
-        self.download_calls.append(model_name)
-        if self.fail_next is not None:
-            error = self.fail_next
-            self.fail_next = None
-            raise error
-
-        filename = self._MODEL_FILES.get(model_name)
-        if filename is None:
-            raise ValueError(f"Unknown model: {model_name}. Must be one of: {list(self._MODEL_FILES)}")
-
-        destination = directory / filename
-        if destination.exists() and destination.stat().st_size > 1_000_000:
-            return {
-                "status": "complete",
-                "path": str(destination),
-                "already_existed": True,
-            }
-
-        directory.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"\x00" * 2_000_000)
-        return {
-            "status": "complete",
-            "path": str(destination),
-            "already_existed": False,
-        }
-
-
 class FakeTextEncoder:
     def __init__(self) -> None:
         self.install_calls = 0
@@ -757,13 +757,16 @@ class FakeServices:
     fast_video_pipeline: FakeFastVideoPipeline = field(default_factory=FakeFastVideoPipeline)
     image_generation_pipeline: FakeImageGenerationPipeline = field(default_factory=FakeImageGenerationPipeline)
     ic_lora_pipeline: FakeIcLoraPipeline = field(default_factory=FakeIcLoraPipeline)
+    depth_processor_pipeline: FakeDepthProcessorPipeline = field(default_factory=FakeDepthProcessorPipeline)
+    pose_processor_pipeline: FakePoseProcessorPipeline = field(default_factory=FakePoseProcessorPipeline)
     a2v_pipeline: FakeA2VPipeline = field(default_factory=FakeA2VPipeline)
     retake_pipeline: FakeRetakePipeline = field(default_factory=FakeRetakePipeline)
-    ic_lora_model_downloader: FakeIcLoraModelDownloader = field(default_factory=FakeIcLoraModelDownloader)
 
     def __post_init__(self) -> None:
         FakeFastVideoPipeline.bind_singleton(self.fast_video_pipeline)
         FakeImageGenerationPipeline.bind_singleton(self.image_generation_pipeline)
         FakeIcLoraPipeline.bind_singleton(self.ic_lora_pipeline)
+        FakeDepthProcessorPipeline.bind_singleton(self.depth_processor_pipeline)
+        FakePoseProcessorPipeline.bind_singleton(self.pose_processor_pipeline)
         FakeA2VPipeline.bind_singleton(self.a2v_pipeline)
         FakeRetakePipeline.bind_singleton(self.retake_pipeline)

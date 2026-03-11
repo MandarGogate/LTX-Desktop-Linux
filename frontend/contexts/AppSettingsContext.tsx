@@ -25,6 +25,7 @@ export interface AppSettings {
   promptEnhancerEnabledI2V: boolean
   seedLocked: boolean
   lockedSeed: number
+  modelsDir: string
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -42,6 +43,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   promptEnhancerEnabledI2V: false,
   seedLocked: false,
   lockedSeed: 42,
+  modelsDir: '',
 }
 
 type BackendProcessStatus = 'alive' | 'restarting' | 'dead'
@@ -89,6 +91,7 @@ function normalizeAppSettings(data: Partial<AppSettings>): AppSettings {
     promptEnhancerEnabledI2V: data.promptEnhancerEnabledI2V ?? DEFAULT_APP_SETTINGS.promptEnhancerEnabledI2V,
     seedLocked: data.seedLocked ?? DEFAULT_APP_SETTINGS.seedLocked,
     lockedSeed: data.lockedSeed ?? DEFAULT_APP_SETTINGS.lockedSeed,
+    modelsDir: data.modelsDir ?? DEFAULT_APP_SETTINGS.modelsDir,
   }
 }
 
@@ -210,7 +213,7 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
     if (!isLoaded || backendProcessStatus !== 'alive') return
     const syncTimer = setTimeout(async () => {
       try {
-        const { hasLtxApiKey: _a, hasFalApiKey: _b, hasGeminiApiKey: _c, ...syncPayload } = settings
+        const { hasLtxApiKey: _a, hasFalApiKey: _b, hasGeminiApiKey: _c, modelsDir: _d, ...syncPayload } = settings
         await backendFetch('/api/settings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

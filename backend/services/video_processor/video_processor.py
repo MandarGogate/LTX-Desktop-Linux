@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Protocol, TypedDict
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 from services.services_utils import FrameArray, VideoCaptureLike, VideoWriterLike
+
+if TYPE_CHECKING:
+    from services.depth_processor_pipeline.depth_processor_pipeline import DepthProcessorPipeline
+    from services.pose_processor_pipeline.pose_processor_pipeline import PoseProcessorPipeline
 
 
 class VideoInfoPayload(TypedDict):
@@ -27,7 +31,10 @@ class VideoProcessor(Protocol):
     def apply_canny(self, frame: FrameArray) -> FrameArray:
         ...
 
-    def apply_depth(self, frame: FrameArray) -> FrameArray:
+    def apply_depth(self, frame: FrameArray, depth_pipeline: DepthProcessorPipeline) -> FrameArray:
+        ...
+
+    def apply_pose(self, frame: FrameArray, pose_pipeline: PoseProcessorPipeline) -> FrameArray:
         ...
 
     def encode_frame_jpeg(self, frame: FrameArray, quality: int = 85) -> bytes:

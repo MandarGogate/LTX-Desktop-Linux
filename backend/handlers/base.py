@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import wraps
+from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
 
@@ -36,6 +37,12 @@ class StateHandlerBase:
     @property
     def config(self) -> RuntimeConfig:
         return self._config
+
+    @property
+    def models_dir(self) -> Path:
+        """Effective models dir: custom from settings, or startup default."""
+        custom = self._state.app_settings.models_dir
+        return Path(custom) if custom else self._config.default_models_dir
 
 
 def with_state_lock(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from api_types import (
     DownloadProgressResponse,
@@ -12,6 +12,7 @@ from api_types import (
     ModelDownloadStartResponse,
     ModelInfo,
     ModelsStatusResponse,
+    RequiredModelsResponse,
     TextEncoderDownloadResponse,
 )
 from _routes._errors import HTTPError
@@ -34,8 +35,24 @@ def route_models_status(handler: AppHandler = Depends(get_state_service)) -> Mod
 
 
 @router.get("/models/download/progress", response_model=DownloadProgressResponse)
-def route_download_progress(handler: AppHandler = Depends(get_state_service)) -> DownloadProgressResponse:
-    return handler.downloads.get_download_progress()
+def route_download_progress(
+    sessionId: str = Query(...),
+    handler: AppHandler = Depends(get_state_service),
+) -> DownloadProgressResponse:
+    try:
+        return handler.downloads.get_download_progress(sessionId)
+    except ValueError as exc:
+        raise HTTPError(404, str(exc))
+
+
+@router.get("/models/required-models", response_model=RequiredModelsResponse)
+def route_required_models(
+    skipTextEncoder: bool = Query(default=False),
+    handler: AppHandler = Depends(get_state_service),
+) -> RequiredModelsResponse:
+    return RequiredModelsResponse(
+        modelTypes=handler.models.get_required_model_types(skip_text_encoder=skipTextEncoder),
+    )
 
 
 @router.post("/models/download", response_model=ModelDownloadStartResponse)
@@ -46,16 +63,12 @@ def route_model_download(
     if handler.downloads.is_download_running():
         raise HTTPError(409, "Download already in progress")
 
-    settings = handler.settings.get_settings_snapshot()
-    skip_text_encoder = req.skipTextEncoder
-    if settings.ltx_api_key and not settings.use_local_text_encoder:
-        skip_text_encoder = True
-
-    if handler.downloads.start_model_download(skip_text_encoder=skip_text_encoder):
+    session_id = handler.downloads.start_model_download(model_types=req.modelTypes)
+    if session_id:
         return ModelDownloadStartResponse(
             status="started",
             message="Model download started",
-            skippingTextEncoder=skip_text_encoder,
+            sessionId=session_id,
         )
 
     raise HTTPError(400, "Failed to start download")
@@ -70,7 +83,8 @@ def route_text_encoder_download(handler: AppHandler = Depends(get_state_service)
     if files["text_encoder"] is not None:
         return TextEncoderDownloadResponse(status="already_downloaded", message="Text encoder already downloaded")
 
-    if handler.downloads.start_text_encoder_download():
-        return TextEncoderDownloadResponse(status="started", message="Text encoder download started")
+    session_id = handler.downloads.start_text_encoder_download()
+    if session_id:
+        return TextEncoderDownloadResponse(status="started", message="Text encoder download started", sessionId=session_id)
 
     raise HTTPError(400, "Failed to start download")

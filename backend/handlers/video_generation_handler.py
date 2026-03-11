@@ -20,6 +20,7 @@ from handlers.base import StateHandlerBase
 from handlers.generation_handler import GenerationHandler
 from handlers.pipelines_handler import PipelinesHandler
 from handlers.text_handler import TextHandler
+from runtime_config.model_download_specs import resolve_model_path
 from server_utils.media_validation import (
     normalize_optional_path,
     validate_audio_file,
@@ -168,7 +169,7 @@ class VideoGenerationHandler(StateHandlerBase):
         if self._generation.is_generation_cancelled():
             raise RuntimeError("Generation was cancelled")
 
-        if not self.config.model_path("checkpoint").exists():
+        if not resolve_model_path(self.models_dir, self.config.model_download_specs,"checkpoint").exists():
             raise RuntimeError("Models not downloaded. Please download the AI models first using the Model Status menu.")
 
         total_steps = 8

@@ -53,6 +53,10 @@ interface ProjectContextType {
   setGenSpaceRetakeSource: (source: GenSpaceRetakeSource | null) => void
   pendingRetakeUpdate: PendingRetakeUpdate | null
   setPendingRetakeUpdate: (update: PendingRetakeUpdate | null) => void
+  genSpaceIcLoraSource: GenSpaceIcLoraSource | null
+  setGenSpaceIcLoraSource: (source: GenSpaceIcLoraSource | null) => void
+  pendingIcLoraUpdate: PendingIcLoraUpdate | null
+  setPendingIcLoraUpdate: (update: PendingIcLoraUpdate | null) => void
 }
 
 export interface GenSpaceRetakeSource {
@@ -65,6 +69,20 @@ export interface GenSpaceRetakeSource {
 }
 
 export interface PendingRetakeUpdate {
+  assetId: string
+  clipIds: string[]
+  newTakeIndex: number
+}
+
+export interface GenSpaceIcLoraSource {
+  videoUrl: string
+  videoPath: string
+  clipId?: string
+  assetId?: string
+  linkedClipIds?: string[]
+}
+
+export interface PendingIcLoraUpdate {
   assetId: string
   clipIds: string[]
   newTakeIndex: number
@@ -158,6 +176,8 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const [genSpaceAudioUrl, setGenSpaceAudioUrl] = useState<string | null>(null)
   const [genSpaceRetakeSource, setGenSpaceRetakeSource] = useState<GenSpaceRetakeSource | null>(null)
   const [pendingRetakeUpdate, setPendingRetakeUpdate] = useState<PendingRetakeUpdate | null>(null)
+  const [genSpaceIcLoraSource, setGenSpaceIcLoraSource] = useState<GenSpaceIcLoraSource | null>(null)
+  const [pendingIcLoraUpdate, setPendingIcLoraUpdate] = useState<PendingIcLoraUpdate | null>(null)
   // Initialize with data from localStorage
   const [projects, setProjects] = useState<Project[]>(() => loadProjectsFromStorage())
   const isInitializedRef = useRef(false)
@@ -514,6 +534,10 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       setGenSpaceRetakeSource,
       pendingRetakeUpdate,
       setPendingRetakeUpdate,
+      genSpaceIcLoraSource,
+      setGenSpaceIcLoraSource,
+      pendingIcLoraUpdate,
+      setPendingIcLoraUpdate,
     }}>
       {children}
     </ProjectContext.Provider>

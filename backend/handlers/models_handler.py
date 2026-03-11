@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 
 from api_types import ModelFileStatus, ModelInfo, ModelsStatusResponse, TextEncoderStatus
 from handlers.base import StateHandlerBase, with_state_lock
-from runtime_config.model_download_specs import MODEL_FILE_ORDER, resolve_required_model_types
-from state.app_state_types import AppState, AvailableFiles
+from runtime_config.model_download_specs import MODEL_FILE_ORDER, resolve_model_path, resolve_required_model_types
+from state.app_state_types import AppState, AvailableFiles, ModelFileType
 
 if TYPE_CHECKING:
     from runtime_config.runtime_config import RuntimeConfig
@@ -34,7 +34,7 @@ class ModelsHandler(StateHandlerBase):
         files: AvailableFiles = {}
         for model_type in MODEL_FILE_ORDER:
             spec = self.config.spec_for(model_type)
-            path = self.config.model_path(model_type)
+            path = resolve_model_path(self.models_dir, self.config.model_download_specs, model_type)
             if spec.is_folder:
                 ready = path.exists() and any(path.iterdir()) if path.exists() else False
                 files[model_type] = path if ready else None
@@ -74,6 +74,20 @@ class ModelsHandler(StateHandlerBase):
             ),
         ]
 
+    @with_state_lock
+    def get_required_model_types(self, skip_text_encoder: bool = False) -> list[ModelFileType]:
+        settings = self.state.app_settings
+        required = resolve_required_model_types(
+            self._config.required_model_types,
+            has_api_key=bool(settings.ltx_api_key),
+            use_local_text_encoder=settings.use_local_text_encoder,
+        )
+        return [
+            model_type
+            for model_type in MODEL_FILE_ORDER
+            if model_type in required and not (skip_text_encoder and model_type == "text_encoder")
+        ]
+
     def get_models_status(self, has_api_key: bool | None = None) -> ModelsStatusResponse:
         files = self.refresh_available_files()
         settings = self.state.app_settings.model_copy(deep=True)
@@ -109,6 +123,7 @@ class ModelsHandler(StateHandlerBase):
 
             models.append(
                 ModelFileStatus(
+                    id=model_type,
                     name=spec.name,
                     description=description,
                     downloaded=exists,
@@ -129,7 +144,7 @@ class ModelsHandler(StateHandlerBase):
             downloaded_size=downloaded_size,
             total_size_gb=round(total_size / (1024**3), 1),
             downloaded_size_gb=round(downloaded_size / (1024**3), 1),
-            models_path=str(self.config.models_dir),
+            models_path=str(self.models_dir),
             has_api_key=has_api_key,
             text_encoder_status=self.get_text_encoder_status(),
             use_local_text_encoder=settings.use_local_text_encoder,

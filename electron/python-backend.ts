@@ -18,9 +18,11 @@ let takeoverInFlight: Promise<void> | null = null
 
 let backendUrl: string | null = null
 let authToken: string | null = null
+let adminToken: string | null = null
 
 export function getBackendUrl(): string | null { return backendUrl }
 export function getAuthToken(): string | null { return authToken }
+export function getAdminToken(): string | null { return adminToken }
 
 type BackendOwnership = 'managed' | 'adopted' | null
 
@@ -233,8 +235,9 @@ export async function startPythonBackend(): Promise<void> {
       pythonArgs = isDev ? ['-Xfrozen_modules=off', '-u', mainPy] : ['-u', mainPy]
     }
 
-    // Generate auth token for this backend session
+    // Generate auth token and admin token for this backend session
     authToken = crypto.randomBytes(32).toString('base64url')
+    adminToken = crypto.randomBytes(32).toString('base64url')
 
     pythonProcess = spawn(pythonPath, pythonArgs, {
       cwd: backendPath,
@@ -245,6 +248,7 @@ export async function startPythonBackend(): Promise<void> {
         // Only pass LTX_PORT when the developer explicitly set it
         ...(process.env.LTX_PORT ? { LTX_PORT: process.env.LTX_PORT } : {}),
         LTX_AUTH_TOKEN: authToken,
+        LTX_ADMIN_TOKEN: adminToken,
         LTX_LOG_FILE: getCurrentLogFilename(),
         LTX_APP_DATA_DIR: getAppDataDir(),
         PYTORCH_ENABLE_MPS_FALLBACK: '1',
@@ -330,6 +334,7 @@ export async function startPythonBackend(): Promise<void> {
       pythonProcess = null
       backendUrl = null
       authToken = null
+      adminToken = null
 
       if (!started) {
         if (isIntentionalShutdown) {

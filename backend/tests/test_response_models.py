@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from state.app_state_types import FileDownloadRunning, GpuSlot, VideoPipelineState, VideoPipelineWarmth
+from state.app_state_types import DownloadingSession, FileDownloadRunning, GpuSlot, VideoPipelineState, VideoPipelineWarmth
 from tests.fakes.services import FakeFastVideoPipeline
 
 
@@ -31,33 +31,36 @@ class TestGenerationProgressCamelCaseKeys:
         assert data["totalSteps"] == 20
 
 
-class TestDownloadProgressCamelCaseKeys:
-    def test_camelcase_keys(self, client, test_state):
-        test_state.state.downloading_session = {
-            "checkpoint": FileDownloadRunning(
+class TestDownloadProgressSnakeCaseKeys:
+    def test_snake_case_keys(self, client, test_state):
+        test_state.state.downloading_session = DownloadingSession(
+            id="test-session",
+            current_running_file=FileDownloadRunning(
+                file_type="checkpoint",
                 target_path="checkpoint",
-                progress=0.45,
                 downloaded_bytes=5_000_000_000,
-                total_bytes=19_000_000_000,
                 speed_mbps=50,
-            )
-        }
+            ),
+            files_to_download={"checkpoint"},
+            completed_files=set(),
+            completed_bytes=0,
+        )
 
-        r = client.get("/api/models/download/progress")
+        r = client.get("/api/models/download/progress", params={"sessionId": "test-session"})
         assert r.status_code == 200
         data = r.json()
 
         expected_keys = {
             "status",
-            "currentFile",
-            "currentFileProgress",
-            "totalProgress",
-            "downloadedBytes",
-            "totalBytes",
-            "filesCompleted",
-            "totalFiles",
+            "current_downloading_file",
+            "current_file_progress",
+            "total_progress",
+            "total_downloaded_bytes",
+            "expected_total_bytes",
+            "completed_files",
+            "all_files",
             "error",
-            "speedMbps",
+            "speed_mbps",
         }
         assert set(data.keys()) == expected_keys
 

@@ -2,10 +2,32 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from runtime_config.model_download_specs import resolve_model_path
 from state.app_settings import UpdateSettingsRequest
-from state.app_state_types import CpuSlot, GpuSlot, RetakePipelineState, StartupError, StartupLoading, StartupPending, StartupReady, VideoPipelineState, VideoPipelineWarmth
+from state.app_state_types import (
+    CpuSlot,
+    GpuSlot,
+    ICLoraState,
+    RetakePipelineState,
+    StartupError,
+    StartupLoading,
+    StartupPending,
+    StartupReady,
+    VideoPipelineState,
+    VideoPipelineWarmth,
+)
+
+
+def _model_path(test_state, model_type: str) -> Path:
+    return resolve_model_path(
+        test_state.config.default_models_dir,
+        test_state.config.model_download_specs,
+        model_type,
+    )
 
 
 def test_start_generation_requires_gpu(test_state):
@@ -41,10 +63,11 @@ def test_zit_slot_invariant_enforced(test_state, fake_services):
 
 
 def test_download_terminal_state_is_sticky_until_next_session(test_state):
-    test_state.downloads.start_download({"checkpoint": ("checkpoint", 100)})
-    test_state.downloads.complete_file("checkpoint")
+    session_id = test_state.downloads.start_download({"checkpoint"})
+    test_state.downloads.start_file("checkpoint", "checkpoint")
+    test_state.downloads.finish_download()
 
-    progress = test_state.downloads.get_download_progress()
+    progress = test_state.downloads.get_download_progress(session_id)
     assert progress.status == "complete"
 
 
@@ -177,3 +200,36 @@ def test_retake_pipeline_eviction(test_state):
 
     test_state.pipelines.load_gpu_pipeline("fast")
     assert isinstance(test_state.state.gpu_slot.active_pipeline, VideoPipelineState)
+
+
+def test_ic_lora_load_includes_depth_and_pose_resources(test_state, fake_services):
+    lora_path = str(_model_path(test_state,"ic_lora"))
+    depth_path = str(_model_path(test_state,"depth_processor"))
+    person_detector_path = str(_model_path(test_state,"person_detector"))
+    pose_path = str(_model_path(test_state,"pose_processor"))
+
+    ic_state = test_state.pipelines.load_ic_lora(lora_path, depth_path, person_detector_path, pose_path)
+
+    assert isinstance(ic_state, ICLoraState)
+    assert ic_state.pipeline is fake_services.ic_lora_pipeline
+    assert ic_state.depth_pipeline is fake_services.depth_processor_pipeline
+    assert ic_state.pose_pipeline is fake_services.pose_processor_pipeline
+    assert ic_state.lora_path == lora_path
+    assert ic_state.depth_model_path == depth_path
+    assert ic_state.person_detector_model_path == person_detector_path
+    assert ic_state.pose_model_path == pose_path
+
+
+def test_ic_lora_unload_clears_preprocessing_resources(test_state):
+    lora_path = str(_model_path(test_state,"ic_lora"))
+    depth_path = str(_model_path(test_state,"depth_processor"))
+    person_detector_path = str(_model_path(test_state,"person_detector"))
+    pose_path = str(_model_path(test_state,"pose_processor"))
+    test_state.pipelines.load_ic_lora(lora_path, depth_path, person_detector_path, pose_path)
+
+    assert isinstance(test_state.state.gpu_slot, GpuSlot)
+    assert isinstance(test_state.state.gpu_slot.active_pipeline, ICLoraState)
+
+    test_state.pipelines.unload_gpu_pipeline()
+
+    assert test_state.state.gpu_slot is None

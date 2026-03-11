@@ -1,9 +1,9 @@
-import { app, ipcMain } from 'electron'
+import { app, dialog, ipcMain } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import { checkGPU } from '../gpu'
 import { isPythonReady, downloadPythonEmbed } from '../python-setup'
-import { getBackendHealthStatus, getBackendUrl, getAuthToken, startPythonBackend } from '../python-backend'
+import { getBackendHealthStatus, getBackendUrl, getAuthToken, getAdminToken, startPythonBackend } from '../python-backend'
 import { getMainWindow } from '../window'
 import { getAnalyticsState, setAnalyticsEnabled, sendAnalyticsEvent } from '../analytics'
 
@@ -157,6 +157,36 @@ export function registerAppHandlers(): void {
 
   ipcMain.handle('send-analytics-event', async (_event, eventName: string, extraDetails?: Record<string, unknown> | null) => {
     await sendAnalyticsEvent(eventName, extraDetails)
+  })
+
+  ipcMain.handle('open-models-dir-change-dialog', async () => {
+    const mainWindow = getMainWindow()
+    if (!mainWindow) return { success: false, error: 'No window' }
+
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select Models Directory',
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (result.canceled || !result.filePaths.length) return { success: false, error: 'cancelled' }
+
+    const newDir = result.filePaths[0]
+    const url = getBackendUrl()
+    const auth = getAuthToken()
+    const admin = getAdminToken()
+    if (!url || !auth || !admin) return { success: false, error: 'Backend not ready' }
+
+    const resp = await fetch(`${url}/api/settings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${auth}`,
+        'X-Admin-Token': admin,
+      },
+      body: JSON.stringify({ modelsDir: newDir }),
+    })
+    if (!resp.ok) return { success: false, error: await resp.text() }
+
+    return { success: true, path: newDir }
   })
 
 }

@@ -13,12 +13,14 @@ import { Textarea } from '../components/ui/textarea'
 import { Button } from '../components/ui/button'
 import { useGeneration } from '../hooks/use-generation'
 import { useRetake } from '../hooks/use-retake'
+import { useIcLora } from '../hooks/use-ic-lora'
 import { useBackend } from '../hooks/use-backend'
 import { useProjects } from '../contexts/ProjectContext'
 import { useAppSettings } from '../contexts/AppSettingsContext'
 import { fileUrlToPath } from '../lib/url-to-path'
 import { sanitizeForcedApiVideoSettings } from '../lib/api-video-options'
 import { RetakePanel } from '../components/RetakePanel'
+import { ICLoraPanel, CONDITIONING_TYPES, type ICLoraConditioningType } from '../components/ICLoraPanel'
 
 const DEFAULT_SETTINGS: GenerationSettings = {
   model: 'fast',
@@ -49,6 +51,12 @@ export function Playground() {
     if (!shouldVideoGenerateWithLtxApi || mode === 'text-to-image') return
     setSettings((prev) => sanitizeForcedApiVideoSettings({ ...prev, model: 'fast' }))
   }, [mode, shouldVideoGenerateWithLtxApi])
+
+  useEffect(() => {
+    if (forceApiGenerations && mode === 'ic-lora') {
+      setMode('text-to-video')
+    }
+  }, [forceApiGenerations, mode])
 
   // Force pro model + resolution when audio is attached (A2V only supports pro @ 1080p 16:9)
   useEffect(() => {
@@ -89,6 +97,15 @@ export function Playground() {
     retakeResult,
   } = useRetake()
 
+  const {
+    submitIcLora,
+    resetIcLora,
+    isIcLoraGenerating,
+    icLoraStatus,
+    icLoraError,
+    icLoraResult,
+  } = useIcLora()
+
   const [retakeInput, setRetakeInput] = useState({
     videoUrl: null as string | null,
     videoPath: null as string | null,
@@ -98,11 +115,32 @@ export function Playground() {
     ready: false,
   })
   const [retakePanelKey, setRetakePanelKey] = useState(0)
-  
+  const [icLoraInput, setIcLoraInput] = useState({
+    videoUrl: null as string | null,
+    videoPath: null as string | null,
+    conditioningType: 'canny' as 'canny' | 'depth',
+    conditioningStrength: 1.0,
+    ready: false,
+  })
+  const [icLoraPanelKey, setIcLoraPanelKey] = useState(0)
+  const [icLoraCondType, setIcLoraCondType] = useState<ICLoraConditioningType>('canny')
+  const [icLoraStrength, setIcLoraStrength] = useState(1.0)
+
   // Ref to store generated image URL for "Create video" flow
   const generatedImageRef = useRef<string | null>(null)
 
   const handleGenerate = () => {
+    if (mode === 'ic-lora') {
+      if (!icLoraInput.videoPath || !icLoraInput.ready || !prompt.trim()) return
+      submitIcLora({
+        videoPath: icLoraInput.videoPath,
+        conditioningType: icLoraCondType,
+        conditioningStrength: icLoraStrength,
+        prompt,
+      })
+      return
+    }
+
     if (mode === 'retake') {
       if (!retakeInput.videoPath || retakeInput.duration < 2) return
       submitRetake({
@@ -162,17 +200,31 @@ export function Playground() {
       ready: false,
     })
     setRetakePanelKey((prev) => prev + 1)
+    setIcLoraInput({
+      videoUrl: null,
+      videoPath: null,
+      conditioningType: 'canny',
+      conditioningStrength: 1.0,
+      ready: false,
+    })
+    setIcLoraPanelKey((prev) => prev + 1)
+    setIcLoraCondType('canny')
+    setIcLoraStrength(1.0)
     resetRetake()
+    resetIcLora()
     reset()
   }
 
   const isRetakeMode = mode === 'retake'
+  const isIcLoraMode = mode === 'ic-lora'
   const isVideoMode = mode === 'text-to-video' || mode === 'image-to-video'
-  const isBusy = isRetakeMode ? isRetaking : isGenerating
+  const isBusy = isRetakeMode ? isRetaking : isIcLoraMode ? isIcLoraGenerating : isGenerating
   const canGenerate = processStatus === 'alive' && !isBusy && (
     isRetakeMode
       ? retakeInput.ready && !!retakeInput.videoPath
-      : !!prompt.trim()
+      : isIcLoraMode
+        ? icLoraInput.ready && !!icLoraInput.videoPath && !!prompt.trim()
+        : !!prompt.trim()
   )
 
   return (
@@ -216,6 +268,7 @@ export function Playground() {
               mode={mode}
               onModeChange={handleModeChange}
               disabled={isBusy}
+              showIcLora={!forceApiGenerations}
             />
 
             {/* Image Upload - Always shown in video mode (optional: makes it I2V) */}
@@ -241,6 +294,54 @@ export function Playground() {
               />
             )}
 
+            {isIcLoraMode && (
+              <>
+                <ICLoraPanel
+                  resetKey={icLoraPanelKey}
+                  isProcessing={isIcLoraGenerating}
+                  processingStatus={icLoraStatus}
+                  conditioningType={icLoraCondType}
+                  onConditioningTypeChange={setIcLoraCondType}
+                  conditioningStrength={icLoraStrength}
+                  onConditioningStrengthChange={setIcLoraStrength}
+                  outputVideoUrl={icLoraResult?.videoUrl || null}
+                  outputVideoPath={icLoraResult?.videoPath || null}
+                  onChange={setIcLoraInput}
+                />
+
+                {/* Conditioning controls */}
+                <div className="space-y-3 p-4 bg-zinc-900 border border-zinc-800 rounded-2xl">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-zinc-400">Conditioning Type</label>
+                    <select
+                      value={icLoraCondType}
+                      onChange={(e) => setIcLoraCondType(e.target.value as ICLoraConditioningType)}
+                      className="bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-blue-500"
+                    >
+                      {CONDITIONING_TYPES.map(ct => (
+                        <option key={ct.value} value={ct.value}>{ct.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-medium text-zinc-400">Strength</label>
+                      <span className="text-xs text-zinc-400">{icLoraStrength.toFixed(2)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="2"
+                      step="0.05"
+                      value={icLoraStrength}
+                      onChange={(e) => setIcLoraStrength(Number(e.target.value))}
+                      className="w-full accent-blue-500"
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+
             {/* Prompt Input */}
             <Textarea
               label="Prompt"
@@ -254,7 +355,7 @@ export function Playground() {
             />
 
             {/* Settings */}
-            {!isRetakeMode && (
+            {!isRetakeMode && !isIcLoraMode && (
               <SettingsPanel
                 settings={settings}
                 onSettingsChange={setSettings}
@@ -266,16 +367,16 @@ export function Playground() {
             )}
 
             {/* Error Display */}
-            {(generationError || retakeError) && (
+            {(generationError || retakeError || icLoraError) && (
               <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-sm">
-                {(generationError || retakeError)!.includes('TEXT_ENCODING_NOT_CONFIGURED') ? (
+                {(generationError || retakeError || icLoraError)!.includes('TEXT_ENCODING_NOT_CONFIGURED') ? (
                   <div className="space-y-2">
                     <p className="text-red-400 font-medium">Text encoding not configured</p>
                     <p className="text-red-400/80">
                       To generate videos, you need to set up text encoding in Settings.
                     </p>
                   </div>
-                ) : (generationError || retakeError)!.includes('TEXT_ENCODER_NOT_DOWNLOADED') ? (
+                ) : (generationError || retakeError || icLoraError)!.includes('TEXT_ENCODER_NOT_DOWNLOADED') ? (
                   <div className="space-y-2">
                     <p className="text-red-400 font-medium">Text encoder not downloaded</p>
                     <p className="text-red-400/80">
@@ -283,7 +384,7 @@ export function Playground() {
                     </p>
                   </div>
                 ) : (
-                  <span className="text-red-400">{generationError || retakeError}</span>
+                  <span className="text-red-400">{generationError || retakeError || icLoraError}</span>
                 )}
               </div>
             )}
@@ -318,6 +419,11 @@ export function Playground() {
                     <>
                       <Scissors className="h-4 w-4" />
                       {isRetaking ? 'Retaking...' : 'Retake'}
+                    </>
+                  ) : isIcLoraMode ? (
+                    <>
+                      <Sparkles className="h-4 w-4" />
+                      {isIcLoraGenerating ? 'Generating...' : 'Generate IC-LoRA'}
                     </>
                   ) : mode === 'text-to-image' ? (
                     <>
@@ -354,6 +460,15 @@ export function Playground() {
               isGenerating={isRetaking}
               progress={0}
               statusMessage={retakeStatus}
+            />
+          ) : mode === 'ic-lora' ? (
+            <VideoPlayer
+              videoUrl={icLoraResult?.videoUrl || null}
+              videoPath={icLoraResult?.videoPath || null}
+              videoResolution={settings.videoResolution}
+              isGenerating={isIcLoraGenerating}
+              progress={0}
+              statusMessage={icLoraStatus}
             />
           ) : (
             <VideoPlayer

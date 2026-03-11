@@ -2,7 +2,7 @@
 
 // Parameters needed to regenerate a shot
 export interface GenerationParams {
-  mode: 'text-to-video' | 'image-to-video' | 'audio-to-video' | 'text-to-image' | 'retake'
+  mode: 'text-to-video' | 'image-to-video' | 'audio-to-video' | 'text-to-image' | 'retake' | 'ic-lora'
   prompt: string
   model: string
   duration: number
@@ -18,6 +18,9 @@ export interface GenerationParams {
   retakeStartTime?: number
   retakeDuration?: number
   retakeMode?: string
+  icLoraVideoPath?: string
+  icLoraConditioningType?: string
+  icLoraConditioningStrength?: number
 }
 
 // A single "take" (version) of a generated asset

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from state.app_settings import AppSettings, UpdateSettingsRequest
 from state import build_initial_state
 from app_handler import ServiceBundle
+from tests.conftest import TEST_ADMIN_TOKEN
 from tests.fakes.services import FakeServices
 
 
@@ -29,6 +31,7 @@ class TestGetSettings:
         assert data["hasGeminiApiKey"] is False
         assert data["seedLocked"] is False
         assert data["lockedSeed"] == 42
+        assert data["modelsDir"] == ""
         assert "ltxApiKey" not in data
         assert "falApiKey" not in data
         assert "geminiApiKey" not in data
@@ -139,6 +142,73 @@ class TestPostSettings:
         assert r.status_code == 422
 
 
+class TestModelsDirAdminGuard:
+    def test_models_dir_requires_admin_token(self, client, test_state):
+        r = client.post("/api/settings", json={"modelsDir": "/tmp/new-models"})
+        assert r.status_code == 403
+
+    def test_models_dir_with_wrong_admin_token(self, client, test_state):
+        r = client.post(
+            "/api/settings",
+            json={"modelsDir": "/tmp/new-models"},
+            headers={"X-Admin-Token": "wrong-token"},
+        )
+        assert r.status_code == 403
+
+    def test_models_dir_with_valid_admin_token(self, client, test_state):
+        r = client.post(
+            "/api/settings",
+            json={"modelsDir": "/tmp/new-models"},
+            headers={"X-Admin-Token": TEST_ADMIN_TOKEN},
+        )
+        assert r.status_code == 200
+        assert test_state.state.app_settings.models_dir == "/tmp/new-models"
+
+    def test_non_admin_fields_without_admin_token(self, client, test_state):
+        r = client.post("/api/settings", json={"useTorchCompile": True})
+        assert r.status_code == 200
+        assert test_state.state.app_settings.use_torch_compile is True
+
+    def test_effective_models_dir_uses_custom(self, client, test_state):
+        test_state.state.app_settings.models_dir = "/custom/models"
+        assert test_state.models.models_dir == Path("/custom/models")
+
+    def test_effective_models_dir_fallback(self, client, test_state):
+        assert test_state.state.app_settings.models_dir == ""
+        assert test_state.models.models_dir == test_state.config.default_models_dir
+
+    def test_models_dir_persists_and_loads(self, client, test_state, default_app_settings):
+        r = client.post(
+            "/api/settings",
+            json={"modelsDir": "/tmp/persisted-models"},
+            headers={"X-Admin-Token": TEST_ADMIN_TOKEN},
+        )
+        assert r.status_code == 200
+
+        fake_services = FakeServices()
+        bundle = ServiceBundle(
+            http=fake_services.http,
+            gpu_cleaner=fake_services.gpu_cleaner,
+            model_downloader=fake_services.model_downloader,
+            gpu_info=fake_services.gpu_info,
+            video_processor=fake_services.video_processor,
+            text_encoder=fake_services.text_encoder,
+            task_runner=fake_services.task_runner,
+            ltx_api_client=fake_services.ltx_api_client,
+            zit_api_client=fake_services.zit_api_client,
+            fast_video_pipeline_class=type(fake_services.fast_video_pipeline),
+            image_generation_pipeline_class=type(fake_services.image_generation_pipeline),
+            ic_lora_pipeline_class=type(fake_services.ic_lora_pipeline),
+            depth_processor_pipeline_class=type(fake_services.depth_processor_pipeline),
+            pose_processor_pipeline_class=type(fake_services.pose_processor_pipeline),
+            a2v_pipeline_class=type(fake_services.a2v_pipeline),
+            retake_pipeline_class=type(fake_services.retake_pipeline),
+        )
+        loaded = build_initial_state(test_state.config, default_app_settings.model_copy(deep=True), service_bundle=bundle)
+        assert loaded.state.app_settings.models_dir == "/tmp/persisted-models"
+        assert loaded.models.models_dir == Path("/tmp/persisted-models")
+
+
 class TestSettingsPersistence:
     def _new_state(self, test_state, default_app_settings):
         fake_services = FakeServices()
@@ -155,9 +225,10 @@ class TestSettingsPersistence:
             fast_video_pipeline_class=type(fake_services.fast_video_pipeline),
             image_generation_pipeline_class=type(fake_services.image_generation_pipeline),
             ic_lora_pipeline_class=type(fake_services.ic_lora_pipeline),
+            depth_processor_pipeline_class=type(fake_services.depth_processor_pipeline),
+            pose_processor_pipeline_class=type(fake_services.pose_processor_pipeline),
             a2v_pipeline_class=type(fake_services.a2v_pipeline),
             retake_pipeline_class=type(fake_services.retake_pipeline),
-            ic_lora_model_downloader=fake_services.ic_lora_model_downloader,
         )
         return build_initial_state(test_state.config, default_app_settings.model_copy(deep=True), service_bundle=bundle)
 
