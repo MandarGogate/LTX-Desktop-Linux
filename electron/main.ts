@@ -13,12 +13,21 @@ import { initAutoUpdater } from './updater'
 import { createWindow, getMainWindow } from './window'
 import { sendAnalyticsEvent } from './analytics'
 
+function logAppVersion(): void {
+  if (!app.isPackaged) {
+    console.log('[LTX Desktop] Running in development mode')
+  } else {
+    console.log(`[LTX Desktop] Version ${app.getVersion()}`)
+  }
+}
+
 const gotLock = app.requestSingleInstanceLock()
 
 if (!gotLock) {
   app.quit()
 } else {
   initSessionLog()
+  logAppVersion()
 
   registerAppHandlers()
   registerFileHandlers()
