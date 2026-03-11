@@ -44,7 +44,7 @@ In API-only mode, available resolutions/durations may be limited to what the API
 - Windows 10/11 (x64)
 - NVIDIA GPU with CUDA support and **≥32GB VRAM** (more is better)
 - 16GB+ RAM (32GB recommended)
-- Plenty of free disk space for model weights and outputs
+- **160GB+ free disk space** (for model weights, Python environment, and outputs)
 
 ### macOS (API-only)
 
