@@ -6,6 +6,7 @@
   "venv": ".venv",
   "exclude": [
     "tests",
+    "services/depth_processor_pipeline/depth_anything_v2",
     ".venv",
     "node_modules",
     "dist"

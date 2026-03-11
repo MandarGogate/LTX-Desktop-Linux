@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import cast
 
+from services.depth_processor_pipeline.depth_processor_pipeline import DepthProcessorPipeline
+from services.pose_processor_pipeline.pose_processor_pipeline import PoseProcessorPipeline
 from services.video_processor.video_processor import VideoInfoPayload
 from services.services_utils import FrameArray, VideoCaptureLike, VideoWriterLike
 
@@ -41,18 +43,33 @@ class VideoProcessorImpl:
 
     def apply_canny(self, frame: FrameArray) -> FrameArray:
         import cv2
+        import numpy as np
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 100, 200)
-        return cast(FrameArray, cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR))
+        img = frame.copy()
 
-    def apply_depth(self, frame: FrameArray) -> FrameArray:
-        import cv2
+        # Pad for compatibility with training flow.
+        H, W = img.shape[:2]
+        H_pad = int(np.ceil(H / 64.0) * 64) - H
+        W_pad = int(np.ceil(W / 64.0) * 64) - W
+        if H_pad > 0 or W_pad > 0:
+            img = np.pad(img, [[0, H_pad], [0, W_pad], [0, 0]], mode="edge")
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (15, 15), 0)
-        return cast(FrameArray, cv2.applyColorMap(blurred, cv2.COLORMAP_INFERNO))
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 100, 200)
+
+        # Remove padding
+        edges = edges[:H, :W]
+
+        # HWC3: convert single-channel to 3-channel
+        edges_3ch = np.concatenate([edges[:, :, None]] * 3, axis=2)
+
+        return cast(FrameArray, edges_3ch)
+
+    def apply_depth(self, frame: FrameArray, depth_pipeline: DepthProcessorPipeline) -> FrameArray:
+        return depth_pipeline.apply(frame)
+
+    def apply_pose(self, frame: FrameArray, pose_pipeline: PoseProcessorPipeline) -> FrameArray:
+        return pose_pipeline.apply(frame)
 
     def encode_frame_jpeg(self, frame: FrameArray, quality: int = 85) -> bytes:
         import cv2

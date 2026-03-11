@@ -34,7 +34,7 @@ interface Window {
     getDownloadsPath: () => Promise<string>
     copyToProjectAssets: (srcPath: string, projectId: string) => Promise<{ success: boolean; path?: string; url?: string; error?: string }>
     getProjectAssetsPath: () => Promise<string>
-    setProjectAssetsPath: (newPath: string) => Promise<{ success: boolean; error?: string }>
+    openProjectAssetsPathChangeDialog: () => Promise<{ success: boolean; path?: string; error?: string }>
     showSaveDialog: (options: { title?: string; defaultPath?: string; filters?: { name: string; extensions: string[] }[] }) => Promise<string | null>
     saveFile: (filePath: string, data: string, encoding?: string) => Promise<{ success: boolean; path?: string; error?: string }>
     saveBinaryFile: (filePath: string, data: ArrayBuffer) => Promise<{ success: boolean; path?: string; error?: string }>
@@ -58,6 +58,7 @@ interface Window {
     onBackendHealthStatus: (cb: (data: BackendHealthStatus) => void) => (() => void)
     extractVideoFrame: (videoUrl: string, seekTime: number, width?: number, quality?: number) => Promise<{ path: string; url: string }>
     writeLog: (level: string, message: string) => Promise<void>
+    openModelsDirChangeDialog: () => Promise<{ success: boolean; path?: string; error?: string }>
     getAnalyticsState: () => Promise<{ analyticsEnabled: boolean; installationId: string }>
     setAnalyticsEnabled: (enabled: boolean) => Promise<void>
     sendAnalyticsEvent: (eventName: string, extraDetails?: Record<string, unknown> | null) => Promise<void>

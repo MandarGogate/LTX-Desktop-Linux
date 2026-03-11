@@ -35,17 +35,18 @@ export function getProjectAssetsPath(): string {
   if (cachedProjectAssetsPath) return cachedProjectAssetsPath
   const state = readAppState()
   if (state.projectAssetsPath) {
-    cachedProjectAssetsPath = state.projectAssetsPath
+    cachedProjectAssetsPath = path.resolve(state.projectAssetsPath)
     return cachedProjectAssetsPath
   }
-  const defaultPath = path.join(app.getPath('downloads'), 'Ltx Desktop Assets')
+  const defaultPath = path.resolve(path.join(app.getPath('downloads'), 'Ltx Desktop Assets'))
   cachedProjectAssetsPath = defaultPath
   return defaultPath
 }
 
 export function setProjectAssetsPath(p: string): void {
-  cachedProjectAssetsPath = p
+  const resolvedPath = path.resolve(p)
+  cachedProjectAssetsPath = resolvedPath
   const state = readAppState()
-  state.projectAssetsPath = p
+  state.projectAssetsPath = resolvedPath
   writeAppState(state)
 }

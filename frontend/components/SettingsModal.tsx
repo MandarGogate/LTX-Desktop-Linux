@@ -340,10 +340,9 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                     variant="outline"
                     className="border-zinc-700 flex-shrink-0"
                     onClick={async () => {
-                      const dir = await window.electronAPI.showOpenDirectoryDialog({ title: 'Select Project Assets Path' })
-                      if (dir) {
-                        setProjectAssetsPath(dir)
-                        window.electronAPI.setProjectAssetsPath(dir)
+                      const result = await window.electronAPI.openProjectAssetsPathChangeDialog()
+                      if (result.success && result.path) {
+                        setProjectAssetsPath(result.path)
                       }
                     }}
                   >

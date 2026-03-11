@@ -35,6 +35,10 @@ interface ModelDownloadProgress {
   speedMbps: number
 }
 
+interface RequiredModelsResponse {
+  modelTypes: string[]
+}
+
 interface ModelStatusDropdownProps {
   className?: string
 }
@@ -43,6 +47,7 @@ export function ModelStatusDropdown({ className = '' }: ModelStatusDropdownProps
   const [isOpen, setIsOpen] = useState(false)
   const [modelsStatus, setModelsStatus] = useState<ModelsStatus | null>(null)
   const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress | null>(null)
+  const [downloadSessionId, setDownloadSessionId] = useState<string | null>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   // Fetch models status periodically
@@ -65,13 +70,17 @@ export function ModelStatusDropdown({ className = '' }: ModelStatusDropdownProps
 
   // Poll download progress when downloading
   useEffect(() => {
-    if (!isOpen) return
+    if (!isOpen || !downloadSessionId) return
 
     const pollProgress = async () => {
       try {
-        const response = await backendFetch('/api/models/download/progress')
+        const response = await backendFetch(`/api/models/download/progress?sessionId=${downloadSessionId}`)
         if (response.ok) {
-          setDownloadProgress(await response.json())
+          const progress = await response.json()
+          setDownloadProgress(progress)
+          if (progress.status === 'complete' || progress.status === 'error') {
+            setDownloadSessionId(null)
+          }
         }
       } catch (e) {
         logger.error(`Failed to fetch download progress: ${e}`)
@@ -81,7 +90,7 @@ export function ModelStatusDropdown({ className = '' }: ModelStatusDropdownProps
     pollProgress()
     const interval = setInterval(pollProgress, 1000)
     return () => clearInterval(interval)
-  }, [isOpen])
+  }, [isOpen, downloadSessionId])
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -129,11 +138,22 @@ export function ModelStatusDropdown({ className = '' }: ModelStatusDropdownProps
 
   const startDownload = async () => {
     try {
-      await backendFetch('/api/models/download', {
+      const requiredModelsResponse = await backendFetch('/api/models/required-models')
+      const requiredModels = requiredModelsResponse.ok
+        ? await requiredModelsResponse.json() as RequiredModelsResponse
+        : { modelTypes: [] }
+
+      const response = await backendFetch('/api/models/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ modelTypes: requiredModels.modelTypes }),
       })
+      if (response.ok) {
+        const data = await response.json()
+        if (data.sessionId) {
+          setDownloadSessionId(data.sessionId)
+        }
+      }
     } catch (e) {
       logger.error(`Failed to start download: ${e}`)
     }

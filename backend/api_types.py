@@ -8,6 +8,17 @@ from typing import Annotated
 from pydantic import BaseModel, Field, StringConstraints
 
 NonEmptyPrompt = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+ModelFileType = Literal[
+    "checkpoint",
+    "upsampler",
+    "distilled_lora",
+    "ic_lora",
+    "depth_processor",
+    "person_detector",
+    "pose_processor",
+    "text_encoder",
+    "zit",
+]
 
 
 class ImageConditioningInput(NamedTuple):
@@ -33,19 +44,6 @@ class GenerationState(TypedDict):
     progress: int
     current_step: int
     total_steps: int
-
-
-class ModelDownloadState(TypedDict):
-    status: str  # "idle" | "downloading" | "complete" | "error"
-    current_file: str
-    current_file_progress: int
-    total_progress: int
-    downloaded_bytes: int
-    total_bytes: int
-    files_completed: int
-    total_files: int
-    error: str | None
-    speed_mbps: int
 
 
 JsonObject: TypeAlias = dict[str, object]
@@ -117,6 +115,7 @@ class ModelInfo(BaseModel):
 
 
 class ModelFileStatus(BaseModel):
+    id: ModelFileType
     name: str
     description: str
     downloaded: bool
@@ -149,27 +148,15 @@ class ModelsStatusResponse(BaseModel):
 
 class DownloadProgressResponse(BaseModel):
     status: str
-    currentFile: str
-    currentFileProgress: int
-    totalProgress: int
-    downloadedBytes: int
-    totalBytes: int
-    filesCompleted: int
-    totalFiles: int
+    current_downloading_file: ModelFileType | None
+    current_file_progress: int
+    total_progress: int
+    total_downloaded_bytes: int
+    expected_total_bytes: int
+    completed_files: set[ModelFileType]
+    all_files: set[ModelFileType]
     error: str | None
-    speedMbps: int
-
-
-class IcLoraModel(BaseModel):
-    name: str
-    path: str
-    conditioning_type: str
-    reference_downscale_factor: int
-
-
-class IcLoraListResponse(BaseModel):
-    models: list[IcLoraModel]
-    directory: str
+    speed_mbps: int
 
 
 class SuggestGapPromptResponse(BaseModel):
@@ -201,15 +188,8 @@ class RetakeResponse(BaseModel):
 class IcLoraExtractResponse(BaseModel):
     conditioning: str
     original: str
-    conditioning_type: str
+    conditioning_type: Literal["canny", "depth", "pose"]
     frame_time: float
-
-
-class IcLoraDownloadResponse(BaseModel):
-    status: str
-    path: str | None = None
-    already_existed: bool | None = None
-    already_exists: bool | None = None
 
 
 class IcLoraGenerateResponse(BaseModel):
@@ -220,12 +200,13 @@ class IcLoraGenerateResponse(BaseModel):
 class ModelDownloadStartResponse(BaseModel):
     status: str
     message: str | None = None
-    skippingTextEncoder: bool | None = None
+    sessionId: str | None = None
 
 
 class TextEncoderDownloadResponse(BaseModel):
     status: str
     message: str | None = None
+    sessionId: str | None = None
 
 
 class StatusResponse(BaseModel):
@@ -264,8 +245,16 @@ class GenerateImageRequest(BaseModel):
     numImages: int = 1
 
 
+def _default_model_types() -> set[ModelFileType]:
+    return set()
+
+
 class ModelDownloadRequest(BaseModel):
-    skipTextEncoder: bool = False
+    modelTypes: set[ModelFileType] = Field(default_factory=_default_model_types)
+
+
+class RequiredModelsResponse(BaseModel):
+    modelTypes: list[ModelFileType]
 
 
 class SuggestGapPromptRequest(BaseModel):
@@ -286,13 +275,9 @@ class RetakeRequest(BaseModel):
     mode: str = "replace_audio_and_video"
 
 
-class IcLoraDownloadRequest(BaseModel):
-    model: str
-
-
 class IcLoraExtractRequest(BaseModel):
     video_path: str
-    conditioning_type: str = "canny"
+    conditioning_type: Literal["canny", "depth", "pose"] = "canny"
     frame_time: float = 0
 
 
@@ -308,15 +293,9 @@ def _default_ic_lora_images() -> list[IcLoraImageInput]:
 
 class IcLoraGenerateRequest(BaseModel):
     video_path: str
-    lora_path: str
-    conditioning_type: str = "canny"
+    conditioning_type: Literal["canny", "depth", "pose"]
     prompt: NonEmptyPrompt
     conditioning_strength: float = 1.0
-    seed: int = 42
-    height: int = 512
-    width: int = 768
-    num_frames: int = 121
-    frame_rate: float = 24
     num_inference_steps: int = 30
     cfg_guidance_scale: float = 1.0
     negative_prompt: str = ""

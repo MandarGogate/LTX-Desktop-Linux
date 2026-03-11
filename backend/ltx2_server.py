@@ -127,16 +127,14 @@ def _resolve_app_data_dir() -> Path:
 
 APP_DATA_DIR = _resolve_app_data_dir()
 
-MODELS_DIR = APP_DATA_DIR / "models"
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_MODELS_DIR = APP_DATA_DIR / "models"
+DEFAULT_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 OUTPUTS_DIR = APP_DATA_DIR / "outputs"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
-logger.info(f"Models directory: {MODELS_DIR}")
-
-IC_LORA_DIR = MODELS_DIR / "ic-loras"
+logger.info(f"Models directory: {DEFAULT_MODELS_DIR}")
 
 # ============================================================
 # Settings
@@ -157,7 +155,6 @@ from server_utils.model_layout_migration import migrate_legacy_models_layout
 from services.gpu_info.gpu_info_impl import GpuInfoImpl
 
 migrate_legacy_models_layout(APP_DATA_DIR)
-IC_LORA_DIR.mkdir(parents=True, exist_ok=True)
 
 LTX_API_BASE_URL = "https://api.ltx.video"
 
@@ -205,11 +202,10 @@ DEFAULT_NEGATIVE_PROMPT = """blurry, out of focus, overexposed, underexposed, lo
 
 runtime_config = RuntimeConfig(
     device=DEVICE,
-    models_dir=MODELS_DIR,
+    default_models_dir=DEFAULT_MODELS_DIR,
     model_download_specs=DEFAULT_MODEL_DOWNLOAD_SPECS,
     required_model_types=REQUIRED_MODEL_TYPES,
     outputs_dir=OUTPUTS_DIR,
-    ic_lora_dir=IC_LORA_DIR,
     settings_file=SETTINGS_FILE,
     ltx_api_base_url=LTX_API_BASE_URL,
     force_api_generations=FORCE_API_GENERATIONS,
@@ -221,8 +217,9 @@ runtime_config = RuntimeConfig(
 handler = build_initial_state(runtime_config, DEFAULT_APP_SETTINGS)
 
 auth_token = os.environ.get("LTX_AUTH_TOKEN", "")
+admin_token = os.environ.get("LTX_ADMIN_TOKEN", "")
 
-app = create_app(handler=handler, allowed_origins=DEFAULT_ALLOWED_ORIGINS, auth_token=auth_token)
+app = create_app(handler=handler, allowed_origins=DEFAULT_ALLOWED_ORIGINS, auth_token=auth_token, admin_token=admin_token)
 
 
 def precache_model_files(model_dir: Path) -> int:

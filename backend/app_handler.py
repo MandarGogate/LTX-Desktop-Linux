@@ -24,16 +24,17 @@ from handlers import (
 from runtime_config.runtime_config import RuntimeConfig
 from services.interfaces import (
     A2VPipeline,
+    DepthProcessorPipeline,
     FastVideoPipeline,
     ZitAPIClient,
     ImageGenerationPipeline,
     GpuCleaner,
     GpuInfo,
     HTTPClient,
-    IcLoraModelDownloader,
     IcLoraPipeline,
     LTXAPIClient,
     ModelDownloader,
+    PoseProcessorPipeline,
     RetakePipeline,
     TaskRunner,
     TextEncoder,
@@ -61,9 +62,10 @@ class AppHandler:
         fast_video_pipeline_class: type[FastVideoPipeline],
         image_generation_pipeline_class: type[ImageGenerationPipeline],
         ic_lora_pipeline_class: type[IcLoraPipeline],
+        depth_processor_pipeline_class: type[DepthProcessorPipeline],
+        pose_processor_pipeline_class: type[PoseProcessorPipeline],
         a2v_pipeline_class: type[A2VPipeline],
         retake_pipeline_class: type[RetakePipeline],
-        ic_lora_model_downloader: IcLoraModelDownloader,
     ) -> None:
         self.config = config
 
@@ -79,9 +81,10 @@ class AppHandler:
         self.fast_video_pipeline_class = fast_video_pipeline_class
         self.image_generation_pipeline_class = image_generation_pipeline_class
         self.ic_lora_pipeline_class = ic_lora_pipeline_class
+        self.depth_processor_pipeline_class = depth_processor_pipeline_class
+        self.pose_processor_pipeline_class = pose_processor_pipeline_class
         self.a2v_pipeline_class = a2v_pipeline_class
         self.retake_pipeline_class = retake_pipeline_class
-        self.ic_lora_model_downloader = ic_lora_model_downloader
 
         self._lock = threading.RLock()
 
@@ -89,6 +92,11 @@ class AppHandler:
             available_files={
                 "checkpoint": None,
                 "upsampler": None,
+                "distilled_lora": None,
+                "ic_lora": None,
+                "depth_processor": None,
+                "person_detector": None,
+                "pose_processor": None,
                 "text_encoder": None,
                 "zit": None,
             },
@@ -141,6 +149,8 @@ class AppHandler:
             fast_video_pipeline_class=fast_video_pipeline_class,
             image_generation_pipeline_class=image_generation_pipeline_class,
             ic_lora_pipeline_class=ic_lora_pipeline_class,
+            depth_processor_pipeline_class=depth_processor_pipeline_class,
+            pose_processor_pipeline_class=pose_processor_pipeline_class,
             a2v_pipeline_class=a2v_pipeline_class,
             retake_pipeline_class=retake_pipeline_class,
             config=config,
@@ -202,7 +212,6 @@ class AppHandler:
             pipelines_handler=self.pipelines,
             text_handler=self.text,
             video_processor=video_processor,
-            ic_lora_model_downloader=ic_lora_model_downloader,
             config=config,
         )
 
@@ -224,9 +233,10 @@ class ServiceBundle:
     fast_video_pipeline_class: type[FastVideoPipeline]
     image_generation_pipeline_class: type[ImageGenerationPipeline]
     ic_lora_pipeline_class: type[IcLoraPipeline]
+    depth_processor_pipeline_class: type[DepthProcessorPipeline]
+    pose_processor_pipeline_class: type[PoseProcessorPipeline]
     a2v_pipeline_class: type[A2VPipeline]
     retake_pipeline_class: type[RetakePipeline]
-    ic_lora_model_downloader: IcLoraModelDownloader
 
 
 def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
@@ -236,13 +246,14 @@ def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
     from services.gpu_cleaner.torch_cleaner import TorchCleaner
     from services.gpu_info.gpu_info_impl import GpuInfoImpl
     from services.http_client.http_client_impl import HTTPClientImpl
-    from services.ic_lora_model_downloader.ic_lora_model_downloader_impl import IcLoraModelDownloaderImpl
     from services.a2v_pipeline.ltx_a2v_pipeline import LTXa2vPipeline
+    from services.depth_processor_pipeline.midas_dpt_pipeline import MidasDPTPipeline
     from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
     from services.image_generation_pipeline.zit_image_generation_pipeline import ZitImageGenerationPipeline
     from services.ltx_api_client.ltx_api_client_impl import LTXAPIClientImpl
     from services.model_downloader.hugging_face_downloader import HuggingFaceDownloader
     from services.retake_pipeline.ltx_retake_pipeline import LTXRetakePipeline
+    from services.pose_processor_pipeline.dw_pose_pipeline import DWPosePipeline
     from services.task_runner.threading_runner import ThreadingRunner
     from services.text_encoder.ltx_text_encoder import LTXTextEncoder
     from services.video_processor.video_processor_impl import VideoProcessorImpl
@@ -266,9 +277,10 @@ def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
         fast_video_pipeline_class=LTXFastVideoPipeline,
         image_generation_pipeline_class=ZitImageGenerationPipeline,
         ic_lora_pipeline_class=LTXIcLoraPipeline,
+        depth_processor_pipeline_class=MidasDPTPipeline,
+        pose_processor_pipeline_class=DWPosePipeline,
         a2v_pipeline_class=LTXa2vPipeline,
         retake_pipeline_class=LTXRetakePipeline,
-        ic_lora_model_downloader=IcLoraModelDownloaderImpl(),
     )
 
 
@@ -294,7 +306,8 @@ def build_initial_state(
         fast_video_pipeline_class=bundle.fast_video_pipeline_class,
         image_generation_pipeline_class=bundle.image_generation_pipeline_class,
         ic_lora_pipeline_class=bundle.ic_lora_pipeline_class,
+        depth_processor_pipeline_class=bundle.depth_processor_pipeline_class,
+        pose_processor_pipeline_class=bundle.pose_processor_pipeline_class,
         a2v_pipeline_class=bundle.a2v_pipeline_class,
         retake_pipeline_class=bundle.retake_pipeline_class,
-        ic_lora_model_downloader=bundle.ic_lora_model_downloader,
     )

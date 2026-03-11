@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from api_types import GpuInfoResponse, GpuTelemetry, HealthResponse, ModelStatusItem
 from handlers.base import StateHandlerBase, with_state_lock
 from handlers.models_handler import ModelsHandler
+from runtime_config.model_download_specs import resolve_model_path
 from handlers.pipelines_handler import PipelinesHandler
 from logging_policy import log_background_exception
 from services.interfaces import GpuInfo
@@ -116,7 +117,7 @@ class HealthHandler(StateHandlerBase):
                     case _:
                         pass
 
-            zit_models_path = self.config.model_path("zit")
+            zit_models_path = resolve_model_path(self.models_dir, self.config.model_download_specs,"zit")
             zit_exists = zit_models_path.exists() and any(zit_models_path.iterdir())
             if zit_exists:
                 self.set_startup_loading("Preloading Z-Image-Turbo to CPU", 85)

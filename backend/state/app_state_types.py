@@ -5,15 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Protocol
+
+from api_types import ModelFileType
+from state.conditioning_cache import ConditioningCache
 
 if TYPE_CHECKING:
     from state.app_settings import AppSettings
     from services.interfaces import (
         A2VPipeline,
+        DepthProcessorPipeline,
         FastVideoPipeline,
         ImageGenerationPipeline,
         IcLoraPipeline,
+        PoseProcessorPipeline,
         RetakePipeline,
         TextEncoder,
     )
@@ -23,8 +28,6 @@ if TYPE_CHECKING:
 # ============================================================
 # Model file availability (disk truth)
 # ============================================================
-
-ModelFileType = Literal["checkpoint", "upsampler", "text_encoder", "zit"]
 
 # Availability and download are orthogonal concerns.
 AvailableFiles = dict[ModelFileType, Path | None]
@@ -37,27 +40,19 @@ AvailableFiles = dict[ModelFileType, Path | None]
 
 @dataclass
 class FileDownloadRunning:
+    file_type: ModelFileType
     target_path: str
-    progress: float
     downloaded_bytes: int
-    total_bytes: int
     speed_mbps: float
 
 
 @dataclass
-class FileDownloadCompleted:
-    pass
-
-
-FileDownloadState = FileDownloadRunning | FileDownloadCompleted
-
-
-@dataclass
-class DownloadError:
-    error: str
-
-
-DownloadingSession = None | dict[ModelFileType, FileDownloadState] | DownloadError
+class DownloadingSession:
+    id: str
+    current_running_file: FileDownloadRunning | None
+    files_to_download: set[ModelFileType]
+    completed_files: set[ModelFileType]
+    completed_bytes: int
 
 
 # ============================================================
@@ -110,6 +105,12 @@ class VideoPipelineState:
 class ICLoraState:
     pipeline: IcLoraPipeline
     lora_path: str
+    depth_pipeline: DepthProcessorPipeline
+    depth_model_path: str
+    pose_pipeline: PoseProcessorPipeline
+    person_detector_model_path: str
+    pose_model_path: str
+    conditioning_cache: ConditioningCache = field(default_factory=ConditioningCache)
 
 
 @dataclass
@@ -217,18 +218,11 @@ StartupState = StartupPending | StartupLoading | StartupReady | StartupError
 @dataclass
 class AppState:
     available_files: AvailableFiles
-    downloading_session: DownloadingSession
+    downloading_session: DownloadingSession | None
     gpu_slot: GpuSlot | None
     api_generation: GenerationState | None
     cpu_slot: CpuSlot | None
     text_encoder: TextEncoderState | None
     startup: StartupState
     app_settings: AppSettings
-
-    @property
-    def is_downloading(self) -> bool:
-        match self.downloading_session:
-            case dict() as files:
-                return any(isinstance(download_state, FileDownloadRunning) for download_state in files.values())
-            case _:
-                return False
+    completed_download_sessions: dict[str, str] = field(default_factory=lambda: {})

@@ -14,7 +14,7 @@ export interface MenuDepsParams {
   showEffectsBrowser: boolean
   showSourceMonitor: boolean
   showPropertiesPanel: boolean
-  showICLoraPanel: boolean
+  canUseIcLora: boolean
   sourceAsset: any
   activeTool: ToolType
   activeTimeline: any
@@ -51,8 +51,7 @@ export interface MenuDepsParams {
   setShowSourceMonitor: (v: boolean) => void
   setShowEffectsBrowser: (v: boolean) => void
   setShowPropertiesPanel: (v: boolean) => void
-  setShowICLoraPanel: (v: boolean) => void
-  setIcLoraSourceClipId: (v: string | null) => void
+  onICLoraClip: (clip: TimelineClip) => void
   setActiveTool: (v: ToolType) => void
   setLastTrimTool: (v: ToolType) => void
   handleAddTimeline: () => void
@@ -176,11 +175,16 @@ export function buildMenuDefinitions(p: MenuDepsParams): MenuDefinition[] {
         { id: 'tool-slip', label: 'Slip Tool', shortcut: getShortcutLabel(p.kbLayout, 'tool.slip'), action: () => { p.setActiveTool('slip'); p.setLastTrimTool('slip') } },
         { id: 'tool-slide', label: 'Slide Tool', shortcut: getShortcutLabel(p.kbLayout, 'tool.slide'), action: () => { p.setActiveTool('slide'); p.setLastTrimTool('slide') } },
         { id: 'sep-2', label: '', separator: true },
-        // IC-LORA HIDDEN - IC-LoRA menu item hidden because IC-LoRA is broken on server
-        // { id: 'ic-lora', label: 'IC-LoRA Style Transfer...', action: () => {
-        //   p.setIcLoraSourceClipId(p.selectedClip?.type === 'video' ? p.selectedClip.id : null)
-        //   p.setShowICLoraPanel(true)
-        // }},
+        ...(p.canUseIcLora ? [{
+          id: 'ic-lora',
+          label: 'IC-LoRA Style Transfer...',
+          action: () => {
+            if (p.selectedClip?.type === 'video') {
+              p.onICLoraClip(p.selectedClip)
+            }
+          },
+          disabled: p.selectedClip?.type !== 'video',
+        }] : []),
       ],
     },
 
@@ -194,8 +198,6 @@ export function buildMenuDefinitions(p: MenuDepsParams): MenuDefinition[] {
         // EFFECTS HIDDEN - effects-browser menu item hidden because effects are not applied during export
         // { id: 'effects-browser', label: p.showEffectsBrowser ? 'Hide Effects Browser' : 'Show Effects Browser', action: () => p.setShowEffectsBrowser(!p.showEffectsBrowser) },
         { id: 'properties-panel', label: p.showPropertiesPanel ? 'Hide Properties Panel' : 'Show Properties Panel', action: () => p.setShowPropertiesPanel(!p.showPropertiesPanel) },
-        // IC-LORA HIDDEN - IC-LoRA panel toggle hidden because IC-LoRA is broken on server
-        // { id: 'ic-lora-panel', label: p.showICLoraPanel ? 'Hide IC-LoRA Panel' : 'Show IC-LoRA Panel', action: () => p.setShowICLoraPanel(!p.showICLoraPanel) },
         { id: 'sep-1', label: '', separator: true },
         { id: 'fit-to-view', label: 'Zoom to Fit', shortcut: getShortcutLabel(p.kbLayout, 'timeline.fitToView'), action: () => p.fitToViewRef.current!() },
         { id: 'zoom-in', label: 'Zoom In', shortcut: getShortcutLabel(p.kbLayout, 'timeline.zoomIn'), action: () => p.setZoom(z => Math.min(z * 1.25, 10)) },

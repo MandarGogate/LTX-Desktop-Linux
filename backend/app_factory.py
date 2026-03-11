@@ -41,11 +41,13 @@ def create_app(
     allowed_origins: list[str] | None = None,
     title: str = "LTX-2 Video Generation Server",
     auth_token: str = "",
+    admin_token: str = "",
 ) -> FastAPI:
     """Create a configured FastAPI app bound to the provided handler."""
     init_state_service(handler)
 
     app = FastAPI(title=title)
+    app.state.admin_token = admin_token  # type: ignore[attr-defined]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins or DEFAULT_ALLOWED_ORIGINS,
@@ -84,20 +86,22 @@ def create_app(
                 pass
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
+    _FALLBACK = "An unexpected error occurred"
+
     async def _route_http_error_handler(request: Request, exc: Exception) -> JSONResponse:
         if isinstance(exc, HTTPError):
             log_http_error(request, exc)
-            return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+            return JSONResponse(status_code=exc.status_code, content={"error": exc.detail or _FALLBACK})
+        return JSONResponse(status_code=500, content={"error": str(exc) or _FALLBACK})
 
     async def _validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
         if isinstance(exc, RequestValidationError):
-            return JSONResponse(status_code=422, content={"error": str(exc)})
-        return JSONResponse(status_code=422, content={"error": str(exc)})
+            return JSONResponse(status_code=422, content={"error": str(exc) or _FALLBACK})
+        return JSONResponse(status_code=422, content={"error": str(exc) or _FALLBACK})
 
     async def _route_generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
         log_unhandled_exception(request, exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        return JSONResponse(status_code=500, content={"error": str(exc) or _FALLBACK})
 
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.add_exception_handler(HTTPError, _route_http_error_handler)

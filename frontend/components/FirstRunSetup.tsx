@@ -14,15 +14,19 @@ type Step = 'license' | 'location' | 'installing' | 'complete'
 
 interface DownloadProgress {
   status: 'idle' | 'downloading' | 'complete' | 'error'
-  currentFile: string
-  currentFileProgress: number
-  totalProgress: number
-  downloadedBytes: number
-  totalBytes: number
-  filesCompleted: number
-  totalFiles: number
+  current_downloading_file: string | null
+  current_file_progress: number
+  total_progress: number
+  total_downloaded_bytes: number
+  expected_total_bytes: number
+  completed_files: string[]
+  all_files: string[]
   error: string | null
-  speedMbps: number
+  speed_mbps: number
+}
+
+interface RequiredModelsResponse {
+  modelTypes: string[]
 }
 
 // Fun loading messages
@@ -48,6 +52,7 @@ export function LaunchGate({
   const [installPath, setInstallPath] = useState('')
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [downloadSessionId, setDownloadSessionId] = useState<string | null>(null)
   const [installMessage, setInstallMessage] = useState(INSTALL_MESSAGES[0])
   const [availableSpace, setAvailableSpace] = useState('...')
   const [videoPath, setVideoPath] = useState('/splash/splash.mp4')
@@ -77,10 +82,10 @@ export function LaunchGate({
 
   // Calculate ETA based on speed and remaining bytes
   const getTimeRemaining = (): string => {
-    if (!downloadProgress || downloadProgress.speedMbps <= 0) return '--'
-    const remainingBytes = downloadProgress.totalBytes - downloadProgress.downloadedBytes
+    if (!downloadProgress || downloadProgress.speed_mbps <= 0) return '--'
+    const remainingBytes = downloadProgress.expected_total_bytes - downloadProgress.total_downloaded_bytes
     if (remainingBytes <= 0) return '--'
-    const speedBytesPerSec = downloadProgress.speedMbps * 1024 * 1024
+    const speedBytesPerSec = downloadProgress.speed_mbps * 1024 * 1024
     const secondsRemaining = remainingBytes / speedBytesPerSec
     return formatTimeRemaining(secondsRemaining)
   }
@@ -150,11 +155,11 @@ export function LaunchGate({
 
   // Poll download progress during installation
   useEffect(() => {
-    if (currentStep !== 'installing') return
+    if (currentStep !== 'installing' || !downloadSessionId) return
 
     const pollProgress = async () => {
       try {
-        const response = await backendFetch('/api/models/download/progress')
+        const response = await backendFetch(`/api/models/download/progress?sessionId=${downloadSessionId}`)
         if (response.ok) {
           const progress = await response.json()
           setDownloadProgress(progress)
@@ -173,7 +178,7 @@ export function LaunchGate({
     pollProgress()
     const interval = setInterval(pollProgress, 500)
     return () => clearInterval(interval)
-  }, [currentStep])
+  }, [currentStep, downloadSessionId])
 
   // Start installation
   const startInstallation = async () => {
@@ -193,11 +198,23 @@ export function LaunchGate({
       }
 
       // Start download - skip text encoder if API key is provided
-      await backendFetch('/api/models/download', {
+      const skipTextEncoder = !!ltxApiKey.trim()
+      const requiredModelsResponse = await backendFetch(`/api/models/required-models?skipTextEncoder=${skipTextEncoder}`)
+      const requiredModels = requiredModelsResponse.ok
+        ? await requiredModelsResponse.json() as RequiredModelsResponse
+        : { modelTypes: [] }
+
+      const downloadResponse = await backendFetch('/api/models/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ skipTextEncoder: !!ltxApiKey.trim() }),
+        body: JSON.stringify({ modelTypes: requiredModels.modelTypes }),
       })
+      if (downloadResponse.ok) {
+        const downloadData = await downloadResponse.json()
+        if (downloadData.sessionId) {
+          setDownloadSessionId(downloadData.sessionId)
+        }
+      }
     } catch (e) {
       logger.error(`Download start error: ${e}`)
       setDownloadError(e instanceof Error ? e.message : 'Failed to start model download.')
@@ -481,9 +498,9 @@ export function LaunchGate({
                   />
                   <button
                     onClick={async () => {
-                      const dir = await window.electronAPI?.showOpenDirectoryDialog({ title: 'Select Model Installation Folder' })
-                      if (dir) {
-                        setInstallPath(dir)
+                      const result = await window.electronAPI?.openModelsDirChangeDialog()
+                      if (result?.success && result.path) {
+                        setInstallPath(result.path)
                       }
                     }}
                     style={{
@@ -681,10 +698,10 @@ export function LaunchGate({
                   marginBottom: 8
                 }}>
                   <span style={{ fontSize: 13, fontWeight: 500 }}>
-                    {(downloadProgress?.totalProgress || 0) > 85 ? 'Installing...' : 'Downloading...'}
+                    {(downloadProgress?.total_progress || 0) > 85 ? 'Installing...' : 'Downloading...'}
                   </span>
                   <span style={{ fontSize: 13, color: '#A98BD9', fontWeight: 600 }}>
-                    {downloadProgress?.totalProgress || 0}%
+                    {downloadProgress?.total_progress || 0}%
                   </span>
                 </div>
 
@@ -701,7 +718,7 @@ export function LaunchGate({
                     backgroundSize: '200% 200%',
                     animation: 'gradientShift 3s ease infinite',
                     borderRadius: 3,
-                    width: `${downloadProgress?.totalProgress || 0}%`,
+                    width: `${downloadProgress?.total_progress || 0}%`,
                     transition: 'width 0.3s ease'
                   }} />
                 </div>
@@ -717,22 +734,22 @@ export function LaunchGate({
                 }}>
                   {/* Current file */}
                   <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {downloadProgress?.currentFile || installMessage}
+                    {downloadProgress?.current_downloading_file || installMessage}
                   </span>
 
                   {/* Speed and ETA */}
                   <div style={{ display: 'flex', gap: 16, marginLeft: 16, flexShrink: 0 }}>
-                    {downloadProgress && downloadProgress.speedMbps > 0 && (
+                    {downloadProgress && downloadProgress.speed_mbps > 0 && (
                       <span style={{ color: '#6D28D9', fontWeight: 500 }}>
-                        {downloadProgress.speedMbps.toFixed(1)} MB/s
+                        {downloadProgress.speed_mbps.toFixed(1)} MB/s
                       </span>
                     )}
-                    {downloadProgress && downloadProgress.totalBytes > 0 && (
+                    {downloadProgress && downloadProgress.expected_total_bytes > 0 && (
                       <span>
-                        {formatBytes(downloadProgress.downloadedBytes)} / {formatBytes(downloadProgress.totalBytes)}
+                        {formatBytes(downloadProgress.total_downloaded_bytes)} / {formatBytes(downloadProgress.expected_total_bytes)}
                       </span>
                     )}
-                    {downloadProgress && downloadProgress.speedMbps > 0 && (
+                    {downloadProgress && downloadProgress.speed_mbps > 0 && (
                       <span>
                         ETA: {getTimeRemaining()}
                       </span>
@@ -741,13 +758,13 @@ export function LaunchGate({
                 </div>
 
                 {/* Files progress */}
-                {downloadProgress && downloadProgress.totalFiles > 0 && (
+                {downloadProgress && downloadProgress.all_files.length > 0 && (
                   <div style={{
                     marginTop: 6,
                     fontSize: 11,
                     color: '#666'
                   }}>
-                    File {downloadProgress.filesCompleted + 1} of {downloadProgress.totalFiles}
+                    File {downloadProgress.completed_files.length + 1} of {downloadProgress.all_files.length}
                   </div>
                 )}
               </>

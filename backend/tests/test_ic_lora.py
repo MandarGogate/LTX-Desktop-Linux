@@ -4,61 +4,83 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from runtime_config.model_download_specs import resolve_model_path
 from tests.fakes import FakeCapture
 
 
-class TestIcLoraListModels:
-    def test_empty_directory(self, client):
-        r = client.get("/api/ic-lora/list-models")
-        assert r.status_code == 200
-        assert r.json()["models"] == []
+def _model_path(test_state, model_type: str) -> Path:
+    return resolve_model_path(
+        test_state.config.default_models_dir,
+        test_state.config.model_download_specs,
+        model_type,
+    )
 
-    def test_with_files(self, client, create_fake_ic_lora_files):
-        create_fake_ic_lora_files(["canny_control", "depth_control"])
-        r = client.get("/api/ic-lora/list-models")
-        data = r.json()
-        assert len(data["models"]) == 2
-        names = [m["name"] for m in data["models"]]
-        assert "canny_control" in names
-        assert "depth_control" in names
 
-    def test_ignores_non_safetensors(self, client, test_state):
-        (test_state.config.ic_lora_dir / "notes.txt").write_text("hello")
-        (test_state.config.ic_lora_dir / "model.safetensors").write_bytes(b"\x00" * 1024)
+def _create_ic_lora_resources(
+    test_state,
+    *,
+    include_depth: bool = True,
+    include_person_detector: bool = True,
+    include_pose: bool = True,
+) -> None:
+    ic_lora_path = _model_path(test_state,"ic_lora")
+    ic_lora_path.parent.mkdir(parents=True, exist_ok=True)
+    ic_lora_path.write_bytes(b"\x00" * 100)
 
-        r = client.get("/api/ic-lora/list-models")
-        data = r.json()
-        assert len(data["models"]) == 1
-        assert data["models"][0]["name"] == "model"
+    if include_depth:
+        depth_path = _model_path(test_state,"depth_processor")
+        depth_path.parent.mkdir(parents=True, exist_ok=True)
+        depth_path.write_bytes(b"\x00" * 100)
+
+    if include_person_detector:
+        person_detector_path = _model_path(test_state,"person_detector")
+        person_detector_path.parent.mkdir(parents=True, exist_ok=True)
+        person_detector_path.write_bytes(b"\x00" * 100)
+
+    if include_pose:
+        pose_path = _model_path(test_state,"pose_processor")
+        pose_path.parent.mkdir(parents=True, exist_ok=True)
+        pose_path.write_bytes(b"\x00" * 100)
 
 
 class TestIcLoraDownload:
-    def test_download_known_model(self, client):
-        r = client.post("/api/ic-lora/download-model", json={"model": "canny"})
-        assert r.status_code == 200
-        data = r.json()
-        assert data["status"] == "complete"
-        assert data["already_existed"] is False
+    def test_start_download_when_missing(self, client, test_state):
+        response = client.post("/api/models/download", json={"modelTypes": ["ic_lora"]})
+        assert response.status_code == 200
+        assert response.json()["status"] == "started"
+        assert _model_path(test_state,"ic_lora").exists()
 
-    def test_already_exists(self, client, test_state):
-        dest = test_state.config.ic_lora_dir / "ltx-2-19b-ic-lora-canny-control.safetensors"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"\x00" * 2_000_000)
+        ic_lora_spec = test_state.config.spec_for("ic_lora")
+        file_calls = [call for call in test_state.model_downloader.calls if call["kind"] == "file"]
+        assert file_calls
+        assert any(call["filename"] == ic_lora_spec.name for call in file_calls)
 
-        r = client.post("/api/ic-lora/download-model", json={"model": "canny"})
-        assert r.status_code == 200
-        assert r.json()["already_existed"] is True
+    def test_already_downloaded(self, client, test_state):
+        ic_lora_path = _model_path(test_state,"ic_lora")
+        ic_lora_path.parent.mkdir(parents=True, exist_ok=True)
+        ic_lora_path.write_bytes(b"\x00" * 2048)
 
-    def test_unknown_model(self, client):
-        r = client.post("/api/ic-lora/download-model", json={"model": "nonexistent"})
-        assert r.status_code == 400
+        response = client.post("/api/models/download", json={"modelTypes": ["ic_lora"]})
+        assert response.status_code == 200
+        assert response.json()["status"] == "started"
 
-    def test_network_error(self, client, test_state):
-        test_state.ic_lora_model_downloader.fail_next = RuntimeError("Connection refused")
+    def test_conflict_when_download_in_progress(self, client, test_state):
+        test_state.downloads.start_download({"checkpoint"})
+        response = client.post("/api/models/download", json={"modelTypes": ["ic_lora"]})
+        assert response.status_code == 409
 
-        r = client.post("/api/ic-lora/download-model", json={"model": "canny"})
-        assert r.status_code == 500
-        assert "error" in r.json()
+    def test_download_error_propagates_to_progress(self, client, test_state):
+        test_state.model_downloader.fail_next = RuntimeError("Connection refused")
+
+        response = client.post("/api/models/download", json={"modelTypes": ["ic_lora"]})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "started"
+        session_id = data["sessionId"]
+
+        progress = client.get("/api/models/download/progress", params={"sessionId": session_id})
+        assert progress.status_code == 200
+        assert progress.json()["status"] == "error"
 
 
 class TestIcLoraExtractConditioning:
@@ -67,48 +89,71 @@ class TestIcLoraExtractConditioning:
         video_path.write_bytes(b"\x00" * 100)
         test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a"]))
 
-        r = client.post(
+        response = client.post(
             "/api/ic-lora/extract-conditioning",
             json={"video_path": str(video_path), "conditioning_type": "canny", "frame_time": 0},
         )
-        assert r.status_code == 200
-        data = r.json()
-        assert data["conditioning_type"] == "canny"
-        assert data["conditioning"].startswith("data:image/jpeg;base64,")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["conditioning_type"] == "canny"
+        assert payload["conditioning"].startswith("data:image/jpeg;base64,")
 
-    def test_depth_extraction(self, client, test_state):
+    def test_depth_extraction(self, client, test_state, fake_services):
         video_path = test_state.config.outputs_dir / "test_video.mp4"
         video_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state)
         test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a"]))
 
-        r = client.post(
+        response = client.post(
             "/api/ic-lora/extract-conditioning",
             json={"video_path": str(video_path), "conditioning_type": "depth", "frame_time": 0},
         )
-        assert r.status_code == 200
-        assert r.json()["conditioning_type"] == "depth"
+        assert response.status_code == 200
+        assert response.json()["conditioning_type"] == "depth"
+        assert fake_services.depth_processor_pipeline.apply_calls == ["frame-a"]
+
+    def test_pose_extraction(self, client, test_state, fake_services):
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state)
+        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a"]))
+
+        response = client.post(
+            "/api/ic-lora/extract-conditioning",
+            json={"video_path": str(video_path), "conditioning_type": "pose", "frame_time": 0},
+        )
+        assert response.status_code == 200
+        assert response.json()["conditioning_type"] == "pose"
+        assert fake_services.pose_processor_pipeline.apply_calls == ["frame-a"]
+
+    def test_rejects_unsupported_conditioning_type(self, client, test_state):
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        response = client.post(
+            "/api/ic-lora/extract-conditioning",
+            json={"video_path": str(video_path), "conditioning_type": "unknown", "frame_time": 0},
+        )
+        assert response.status_code == 422
 
     def test_unreadable_frame(self, client, test_state):
         video_path = test_state.config.outputs_dir / "bad_video.mp4"
         video_path.write_bytes(b"\x00" * 100)
         test_state.video_processor.register_video(str(video_path), FakeCapture(frames=[]))
 
-        r = client.post(
+        response = client.post(
             "/api/ic-lora/extract-conditioning",
             json={"video_path": str(video_path), "conditioning_type": "canny"},
         )
-        assert r.status_code == 400
+        assert response.status_code == 400
 
 
 class TestIcLoraGenerate:
     def test_happy_path(self, client, test_state, fake_services):
         video_path = test_state.config.outputs_dir / "input.mp4"
         video_path.write_bytes(b"\x00" * 100)
-        lora_path = test_state.config.ic_lora_dir / "test.safetensors"
-        lora_path.parent.mkdir(parents=True, exist_ok=True)
-        lora_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state)
 
-        te_dir = test_state.config.model_path("text_encoder")
+        te_dir = _model_path(test_state,"text_encoder")
         te_dir.mkdir(parents=True, exist_ok=True)
         (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
         test_state.state.app_settings.use_local_text_encoder = True
@@ -116,70 +161,176 @@ class TestIcLoraGenerate:
         capture = FakeCapture(frames=["f1", "f2"], fps=24, width=64, height=64)
         test_state.video_processor.register_video(str(video_path), capture)
 
-        r = client.post(
+        response = client.post(
             "/api/ic-lora/generate",
             json={
                 "video_path": str(video_path),
-                "lora_path": str(lora_path),
                 "prompt": "test prompt",
                 "conditioning_type": "canny",
+                "seed": 42,
             },
         )
 
-        assert r.status_code == 200
-        data = r.json()
-        assert data["status"] == "complete"
-        assert Path(data["video_path"]).exists()
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "complete"
+        assert Path(payload["video_path"]).exists()
 
         pipeline = fake_services.ic_lora_pipeline
         assert len(pipeline.generate_calls) == 1
 
     def test_video_not_found(self, client, test_state):
-        lora_path = test_state.config.ic_lora_dir / "test.safetensors"
-        lora_path.parent.mkdir(parents=True, exist_ok=True)
-        lora_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state)
 
-        r = client.post(
+        response = client.post(
             "/api/ic-lora/generate",
-            json={"video_path": "/nonexistent/video.mp4", "lora_path": str(lora_path), "prompt": "test"},
+            json={"video_path": "/nonexistent/video.mp4", "prompt": "test", "conditioning_type": "canny", "seed": 42},
         )
-        assert r.status_code == 400
+        assert response.status_code == 400
 
-    def test_lora_not_found(self, client, test_state):
+    def test_ic_lora_not_downloaded(self, client, test_state):
         video_path = test_state.config.outputs_dir / "input.mp4"
         video_path.write_bytes(b"\x00" * 100)
 
-        r = client.post(
+        response = client.post(
             "/api/ic-lora/generate",
-            json={"video_path": str(video_path), "lora_path": "/nonexistent/lora.safetensors", "prompt": "test"},
+            json={"video_path": str(video_path), "prompt": "test", "conditioning_type": "canny", "seed": 42},
         )
-        assert r.status_code == 400
+        assert response.status_code == 400
+        assert "IC-LoRA model not found" in response.json()["error"]
 
     def test_empty_prompt_rejected(self, client, test_state):
         video_path = test_state.config.outputs_dir / "input.mp4"
         video_path.write_bytes(b"\x00" * 100)
-        lora_path = test_state.config.ic_lora_dir / "test.safetensors"
-        lora_path.parent.mkdir(parents=True, exist_ok=True)
-        lora_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state)
 
-        r = client.post(
+        response = client.post(
             "/api/ic-lora/generate",
-            json={"video_path": str(video_path), "lora_path": str(lora_path), "prompt": ""},
+            json={"video_path": str(video_path), "prompt": "", "conditioning_type": "canny", "seed": 42},
         )
-        assert r.status_code == 422
+        assert response.status_code == 422
 
     def test_pipeline_error(self, client, test_state, fake_services):
         video_path = test_state.config.outputs_dir / "input.mp4"
         video_path.write_bytes(b"\x00" * 100)
-        lora_path = test_state.config.ic_lora_dir / "test.safetensors"
-        lora_path.parent.mkdir(parents=True, exist_ok=True)
-        lora_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state)
 
         test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["f1", "f2"]))
         fake_services.ic_lora_pipeline.raise_on_generate = RuntimeError("GPU OOM")
 
-        r = client.post(
+        response = client.post(
             "/api/ic-lora/generate",
-            json={"video_path": str(video_path), "lora_path": str(lora_path), "prompt": "test"},
+            json={"video_path": str(video_path), "prompt": "test", "conditioning_type": "canny", "seed": 42},
         )
-        assert r.status_code == 500
+        assert response.status_code == 500
+
+    def test_pose_generation(self, client, test_state, fake_services):
+        video_path = test_state.config.outputs_dir / "input.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state)
+
+        te_dir = _model_path(test_state,"text_encoder")
+        te_dir.mkdir(parents=True, exist_ok=True)
+        (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        capture = FakeCapture(frames=["f1", "f2"], fps=24, width=64, height=64)
+        test_state.video_processor.register_video(str(video_path), capture)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "test prompt",
+                "conditioning_type": "pose",
+                "seed": 42,
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "complete"
+        assert Path(payload["video_path"]).exists()
+        assert fake_services.pose_processor_pipeline.apply_calls
+
+    def test_rejects_unsupported_conditioning_type(self, client, test_state):
+        video_path = test_state.config.outputs_dir / "input.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={"video_path": str(video_path), "prompt": "test", "conditioning_type": "unknown", "seed": 42},
+        )
+        assert response.status_code == 422
+
+    def test_depth_processor_not_downloaded(self, client, test_state):
+        video_path = test_state.config.outputs_dir / "input.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state, include_depth=False, include_person_detector=True, include_pose=True)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={"video_path": str(video_path), "prompt": "test", "conditioning_type": "depth", "seed": 42},
+        )
+        assert response.status_code == 400
+        assert "Depth processor model not found" in response.json()["error"]
+
+    def test_person_detector_not_downloaded(self, client, test_state):
+        video_path = test_state.config.outputs_dir / "input.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state, include_depth=True, include_person_detector=False, include_pose=True)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={"video_path": str(video_path), "prompt": "test", "conditioning_type": "pose", "seed": 42},
+        )
+        assert response.status_code == 400
+        assert "Person detector model not found" in response.json()["error"]
+
+    def test_pose_processor_not_downloaded(self, client, test_state):
+        video_path = test_state.config.outputs_dir / "input.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state, include_depth=True, include_person_detector=True, include_pose=False)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={"video_path": str(video_path), "prompt": "test", "conditioning_type": "pose", "seed": 42},
+        )
+        assert response.status_code == 400
+        assert "Pose processor model not found" in response.json()["error"]
+
+    def test_second_generation_reuses_conditioning_cache(self, client, test_state, fake_services):
+        video_path = test_state.config.outputs_dir / "input.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state)
+
+        te_dir = _model_path(test_state,"text_encoder")
+        te_dir.mkdir(parents=True, exist_ok=True)
+        (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        capture = FakeCapture(frames=["f1", "f2"], fps=24, width=64, height=64)
+        test_state.video_processor.register_video(str(video_path), capture)
+
+        payload = {
+            "video_path": str(video_path),
+            "prompt": "test prompt",
+            "conditioning_type": "canny",
+            "seed": 42,
+        }
+
+        r1 = client.post("/api/ic-lora/generate", json=payload)
+        assert r1.status_code == 200
+
+        writers_after_first = len(test_state.video_processor.writers)
+
+        # Re-register the video so it can be opened again if needed
+        capture2 = FakeCapture(frames=["f1", "f2"], fps=24, width=64, height=64)
+        test_state.video_processor.register_video(str(video_path), capture2)
+
+        r2 = client.post("/api/ic-lora/generate", json={**payload, "seed": 99})
+        assert r2.status_code == 200
+
+        # Cache hit: no new control video should have been written
+        assert len(test_state.video_processor.writers) == writers_after_first

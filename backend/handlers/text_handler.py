@@ -6,6 +6,7 @@ from threading import RLock
 from typing import TYPE_CHECKING
 
 from handlers.base import StateHandlerBase, with_state_lock
+from runtime_config.model_download_specs import resolve_model_path
 from state.app_state_types import AppState, TextEncodingResult
 
 if TYPE_CHECKING:
@@ -58,7 +59,7 @@ class TextHandler(StateHandlerBase):
         """
         settings = self.state.app_settings.model_copy(deep=True)
         api_available = bool(settings.ltx_api_key)
-        text_encoder_dir = self.config.model_path("text_encoder")
+        text_encoder_dir = resolve_model_path(self.models_dir, self.config.model_download_specs,"text_encoder")
         local_available = text_encoder_dir.exists() and any(text_encoder_dir.iterdir())
 
         if api_available and local_available:
@@ -74,7 +75,7 @@ class TextHandler(StateHandlerBase):
         """
         settings = self.state.app_settings.model_copy(deep=True)
         api_available = bool(settings.ltx_api_key)
-        text_encoder_dir = self.config.model_path("text_encoder")
+        text_encoder_dir = resolve_model_path(self.models_dir, self.config.model_download_specs,"text_encoder")
         local_available = text_encoder_dir.exists() and any(text_encoder_dir.iterdir())
 
         if not api_available and not local_available:
@@ -96,7 +97,7 @@ class TextHandler(StateHandlerBase):
     def resolve_gemma_root(self) -> str | None:
         if not self.should_use_local_encoding():
             return None
-        text_encoder_dir = self.config.model_path("text_encoder")
+        text_encoder_dir = resolve_model_path(self.models_dir, self.config.model_download_specs,"text_encoder")
         return str(text_encoder_dir)
 
     def _prepare_api_embeddings(self, prompt: str, enhance_prompt: bool) -> TextEncodingResult | None:
@@ -121,7 +122,7 @@ class TextHandler(StateHandlerBase):
         encoded = te.service.encode_via_api(
             prompt=prompt,
             api_key=settings.ltx_api_key,
-            checkpoint_path=str(self.config.model_path("checkpoint")),
+            checkpoint_path=str(resolve_model_path(self.models_dir, self.config.model_download_specs,"checkpoint")),
             enhance_prompt=enhance_prompt,
         )
         if encoded is not None:

@@ -24,7 +24,7 @@ LTX Desktop is an Electron app for AI video generation using LTX models. Three-l
 | `pnpm build:mac` / `pnpm build:win` | Full platform builds |
 | `pnpm setup:dev:mac` / `pnpm setup:dev:win` | One-time dev environment setup |
 
-Run a single backend test: `cd backend && uv run pytest tests/test_generation.py -v --tb=short`
+Run a single backend test file via pnpm: `pnpm backend:test -- tests/test_ic_lora.py`
 
 ## CI Checks
 
@@ -36,7 +36,7 @@ PRs must pass: `pnpm typecheck` + `pnpm backend:test` + frontend Vite build.
 - **State management**: React contexts only (`ProjectContext`, `AppSettingsContext`, `KeyboardShortcutsContext`) — no Redux/Zustand
 - **Routing**: View-based via `ProjectContext` with views: `home`, `project`, `playground`
 - **IPC bridge**: All Electron communication through `window.electronAPI` (defined in `electron/preload.ts`)
-- **Backend calls**: Frontend calls `http://localhost:8000` directly
+- **Backend calls**: Always use `backendFetch` from `frontend/lib/backend.ts` for app backend HTTP requests (it attaches auth/session details). Do not call `fetch` directly for backend endpoints.
 - **Styling**: Tailwind with custom semantic color tokens via CSS variables; utilities from `class-variance-authority` + `clsx` + `tailwind-merge`
 - **No frontend tests** currently exist
 

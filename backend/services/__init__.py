@@ -1,6 +1,7 @@
 """State service package exports (interface-first, import-safe)."""
 
 from services.interfaces import (
+    DepthProcessorPipeline,
     FastVideoPipeline,
     ZitAPIClient,
     ImageGenerationPipeline,
@@ -9,10 +10,10 @@ from services.interfaces import (
     HTTPClient,
     HttpResponseLike,
     HttpTimeoutError,
-    IcLoraModelDownloader,
     IcLoraPipeline,
     LTXAPIClient,
     ModelDownloader,
+    PoseProcessorPipeline,
     TaskRunner,
     TextEncoder,
     VideoPipelineModelType,
@@ -27,6 +28,8 @@ __all__ = [
     "GpuCleaner",
     "GpuInfo",
     "VideoProcessor",
+    "DepthProcessorPipeline",
+    "PoseProcessorPipeline",
     "TaskRunner",
     "TextEncoder",
     "VideoPipelineModelType",
@@ -34,6 +37,5 @@ __all__ = [
     "ZitAPIClient",
     "ImageGenerationPipeline",
     "IcLoraPipeline",
-    "IcLoraModelDownloader",
     "LTXAPIClient",
 ]

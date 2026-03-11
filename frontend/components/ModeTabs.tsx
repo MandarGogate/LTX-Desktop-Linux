@@ -1,29 +1,38 @@
 import { cn } from '@/lib/utils'
-import { Video, ImageIcon, Scissors } from 'lucide-react'
+import { Video, ImageIcon, Scissors, Sparkles } from 'lucide-react'
 
-export type GenerationMode = 'text-to-video' | 'image-to-video' | 'text-to-image' | 'retake'
+export type GenerationMode = 'text-to-video' | 'image-to-video' | 'text-to-image' | 'retake' | 'ic-lora'
 
 // Simplified tab modes shown in the UI
-type TabMode = 'video' | 'text-to-image' | 'retake'
+type TabMode = 'video' | 'text-to-image' | 'retake' | 'ic-lora'
 
 interface ModeTabsProps {
   mode: GenerationMode
   onModeChange: (mode: GenerationMode) => void
   disabled?: boolean
+  showIcLora?: boolean
 }
 
 const tabs: { id: TabMode; label: string; genMode: GenerationMode; icon: React.ElementType }[] = [
   { id: 'video', label: 'Video', genMode: 'text-to-video', icon: Video },
   { id: 'text-to-image', label: 'Image', genMode: 'text-to-image', icon: ImageIcon },
   { id: 'retake', label: 'Retake', genMode: 'retake', icon: Scissors },
+  { id: 'ic-lora', label: 'IC-LoRA', genMode: 'ic-lora', icon: Sparkles },
 ]
 
-export function ModeTabs({ mode, onModeChange, disabled }: ModeTabsProps) {
-  const activeTab: TabMode = mode === 'text-to-image' ? 'text-to-image' : mode === 'retake' ? 'retake' : 'video'
+export function ModeTabs({ mode, onModeChange, disabled, showIcLora = true }: ModeTabsProps) {
+  const activeTab: TabMode = mode === 'text-to-image'
+    ? 'text-to-image'
+    : mode === 'retake'
+      ? 'retake'
+      : mode === 'ic-lora'
+        ? 'ic-lora'
+        : 'video'
+  const visibleTabs = showIcLora ? tabs : tabs.filter((tab) => tab.id !== 'ic-lora')
 
   return (
     <div className="flex gap-1 p-1 bg-zinc-900 border border-zinc-800 rounded-xl">
-      {tabs.map((tab) => {
+      {visibleTabs.map((tab) => {
         const Icon = tab.icon
         const isActive = activeTab === tab.id
         return (

@@ -11,7 +11,7 @@ import {
   Music,
   X, RefreshCw, Loader2,
   MessageSquare, FileUp, FileDown,
-  Link2, Type, // EFFECTS HIDDEN: removed Search // IC-LORA HIDDEN: removed Sparkles
+  Sparkles, Link2, Type, // EFFECTS HIDDEN: removed Search
   CircleDot, Circle, RotateCcw, Save, LayoutGrid, PanelRight
 } from 'lucide-react'
 import { useProjects } from '../contexts/ProjectContext'
@@ -25,7 +25,6 @@ import { ExportModal } from '../components/ExportModal'
 import { MenuBar, type MenuDefinition } from '../components/MenuBar'
 import { ImportTimelineModal } from '../components/ImportTimelineModal'
 import { ClipWaveform } from '../components/AudioWaveform'
-// IC-LORA HIDDEN - import { ICLoraPanel } from '../components/ICLoraPanel'
 import type { TimelineClip, Track, SubtitleClip } from '../types/project' // EFFECTS HIDDEN: removed EffectType
 import { DEFAULT_TRACKS } from '../types/project' // EFFECTS HIDDEN: removed EFFECT_DEFINITIONS
 import {
@@ -79,10 +78,11 @@ export function VideoEditor() {
     setActiveTimeline, updateTimeline, getActiveTimeline,
     setCurrentTab, setGenSpaceEditImageUrl, setGenSpaceEditMode, setGenSpaceAudioUrl,
     setGenSpaceRetakeSource, pendingRetakeUpdate, setPendingRetakeUpdate,
+    setGenSpaceIcLoraSource, pendingIcLoraUpdate, setPendingIcLoraUpdate,
   } = useProjects()
 
   const { activeLayout: kbLayout, isEditorOpen: isKbEditorOpen, setEditorOpen: setKbEditorOpen } = useKeyboardShortcuts()
-  const { shouldVideoGenerateWithLtxApi } = useAppSettings()
+  const { shouldVideoGenerateWithLtxApi, forceApiGenerations } = useAppSettings()
   const kbLayoutRef = useRef(kbLayout)
   kbLayoutRef.current = kbLayout
   const isKbEditorOpenRef = useRef(isKbEditorOpen)
@@ -1064,14 +1064,11 @@ export function VideoEditor() {
   // Regeneration / I2V hook (state + logic extracted)
   const {
     regeneratingAssetId,
-    showICLoraPanel: _showICLoraPanel, setShowICLoraPanel: _setShowICLoraPanel, // IC-LORA HIDDEN
-    icLoraSourceClipId: _icLoraSourceClipId, setIcLoraSourceClipId: _setIcLoraSourceClipId, // IC-LORA HIDDEN
     i2vClipId, setI2vClipId,
     i2vPrompt, setI2vPrompt,
     i2vSettings, setI2vSettings,
     handleI2vGenerate,
     handleRegenerate, handleCancelRegeneration,
-    handleICLoraResult: _handleICLoraResult, // IC-LORA HIDDEN
     handleClipTakeChange, handleDeleteTake,
     regenerationPreError, dismissRegenerationPreError,
   } = useRegeneration({
@@ -1085,6 +1082,7 @@ export function VideoEditor() {
     projectId: currentProjectId ?? '',
     shouldVideoGenerateWithLtxApi,
   })
+  const canUseIcLora = !forceApiGenerations
   
   useEditorKeyboard({
     refs: {
@@ -1534,6 +1532,33 @@ export function VideoEditor() {
     setCurrentTab('gen-space')
   }, [getLiveAsset, setGenSpaceRetakeSource, setCurrentTab])
 
+  const handleICLoraClip = useCallback((clip: TimelineClip) => {
+    if (!canUseIcLora) return
+    const liveAsset = getLiveAsset(clip)
+    if (!liveAsset) return
+
+    const takeIndex = clip.takeIndex ?? liveAsset.activeTakeIndex
+    let takePath = liveAsset.path
+    let takeUrl = liveAsset.url
+    if (liveAsset.takes && liveAsset.takes.length > 0 && takeIndex !== undefined) {
+      const idx = Math.max(0, Math.min(takeIndex, liveAsset.takes.length - 1))
+      takePath = liveAsset.takes[idx].path
+      takeUrl = liveAsset.takes[idx].url
+    }
+
+    const linkedIds = new Set(clip.linkedClipIds || [])
+    linkedIds.add(clip.id)
+
+    setGenSpaceIcLoraSource({
+      videoUrl: takeUrl,
+      videoPath: takePath,
+      clipId: clip.id,
+      assetId: liveAsset.id,
+      linkedClipIds: [...linkedIds],
+    })
+    setCurrentTab('gen-space')
+  }, [canUseIcLora, getLiveAsset, setGenSpaceIcLoraSource, setCurrentTab])
+
   useEffect(() => {
     if (!pendingRetakeUpdate) return
     setClips(prev => prev.map(c => {
@@ -1543,6 +1568,16 @@ export function VideoEditor() {
     }))
     setPendingRetakeUpdate(null)
   }, [pendingRetakeUpdate, setPendingRetakeUpdate, setClips])
+
+  useEffect(() => {
+    if (!pendingIcLoraUpdate) return
+    setClips(prev => prev.map(c => {
+      if (c.assetId !== pendingIcLoraUpdate.assetId) return c
+      if (!pendingIcLoraUpdate.clipIds.includes(c.id)) return c
+      return { ...c, takeIndex: pendingIcLoraUpdate.newTakeIndex }
+    }))
+    setPendingIcLoraUpdate(null)
+  }, [pendingIcLoraUpdate, setPendingIcLoraUpdate, setClips])
 
   // Populate fullscreen ref for keyboard handler
   toggleFullscreenRef.current = toggleFullscreen
@@ -1663,7 +1698,7 @@ export function VideoEditor() {
   // Menu bar definitions (extracted)
   const menuDefinitions: MenuDefinition[] = useMemo(() => buildMenuDefinitions({
     selectedClip, selectedClipIds, clips, tracks, subtitles, snapEnabled,
-    showEffectsBrowser, showSourceMonitor, showPropertiesPanel, showICLoraPanel: _showICLoraPanel, // IC-LORA HIDDEN
+    showEffectsBrowser, showSourceMonitor, showPropertiesPanel,
     sourceAsset, activeTool, activeTimeline, timelines, kbLayout,
     fileInputRef, subtitleFileInputRef,
     setShowImportTimelineModal, setShowExportModal, handleExportTimelineXml, handleExportSrt,
@@ -1672,10 +1707,10 @@ export function VideoEditor() {
     splitClipAtPlayhead, duplicateClip, pushUndo, setClips, updateClip, setTracks,
     addTextClip, addSubtitleTrack, createAdjustmentLayerAsset, setSnapEnabled, fitToViewRef, setZoom,
     setShowSourceMonitor, setShowEffectsBrowser, setShowPropertiesPanel,
-    setShowICLoraPanel: _setShowICLoraPanel, setIcLoraSourceClipId: _setIcLoraSourceClipId, // IC-LORA HIDDEN
+    canUseIcLora, onICLoraClip: handleICLoraClip,
     setActiveTool, setLastTrimTool,
     handleAddTimeline, handleDuplicateTimeline, handleResetLayout,
-  }), [selectedClip, selectedClipIds, clips, tracks, subtitles, snapEnabled, showEffectsBrowser, showSourceMonitor, showPropertiesPanel, _showICLoraPanel, sourceAsset, activeTool, activeTimeline, timelines, handleInsertEdit, handleOverwriteEdit, kbLayout])
+  }), [selectedClip, selectedClipIds, clips, tracks, subtitles, snapEnabled, showEffectsBrowser, showSourceMonitor, showPropertiesPanel, sourceAsset, activeTool, activeTimeline, timelines, handleInsertEdit, handleOverwriteEdit, kbLayout, canUseIcLora, handleICLoraClip])
 
 
   // --- Render ---
@@ -2313,26 +2348,28 @@ export function VideoEditor() {
               </button>
             </Tooltip>
 
-            {/* IC-LORA HIDDEN - IC-LoRA toolbar button hidden because IC-LoRA is broken on server
-            <div className="w-6 h-px bg-zinc-700 my-1 flex-shrink-0" />
+            {canUseIcLora && (
+              <>
+                <div className="w-6 h-px bg-zinc-700 my-1 flex-shrink-0" />
 
-            <Tooltip content="IC-LoRA Style Transfer" side="right">
-              <button
-                onClick={() => {
-                  setIcLoraSourceClipId(selectedClip?.type === 'video' ? selectedClip.id : null)
-                  setShowICLoraPanel(true)
-                }}
-                className={`p-1.5 rounded-lg transition-colors flex-shrink-0 group relative ${
-                  showICLoraPanel ? 'bg-amber-600/20 text-amber-400' : 'text-amber-500/70 hover:bg-amber-900/30 hover:text-amber-400'
-                }`}
-              >
-                <Sparkles className="h-4 w-4" />
-                <div className="absolute left-full ml-2 px-2 py-1 bg-zinc-800 rounded text-xs text-white whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none z-50">
-                  IC-LoRA Style Transfer
-                </div>
-              </button>
-            </Tooltip>
-            */}
+                <Tooltip content="IC-LoRA Style Transfer" side="right">
+                  <button
+                    onClick={() => {
+                      if (selectedClip?.type === 'video') {
+                        handleICLoraClip(selectedClip)
+                      }
+                    }}
+                    disabled={selectedClip?.type !== 'video'}
+                    className="p-1.5 rounded-lg transition-colors flex-shrink-0 group relative text-amber-500/70 hover:bg-amber-900/30 hover:text-amber-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    <div className="absolute left-full ml-2 px-2 py-1 bg-zinc-800 rounded text-xs text-white whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none z-50">
+                      IC-LoRA Style Transfer
+                    </div>
+                  </button>
+                </Tooltip>
+              </>
+            )}
 
             <div className="flex-1" />
 
@@ -4061,8 +4098,8 @@ export function VideoEditor() {
             setI2vClipId={setI2vClipId}
             setI2vPrompt={setI2vPrompt}
             onRetakeClip={handleRetakeClip}
-            setIcLoraSourceClipId={_setIcLoraSourceClipId}
-            setShowICLoraPanel={_setShowICLoraPanel}
+            onICLoraClip={handleICLoraClip}
+            canUseIcLora={canUseIcLora}
             onCaptureFrameForVideo={handleCaptureFrameForVideo}
             onCreateVideoFromAudio={handleCreateVideoFromAudio}
           />
@@ -4085,27 +4122,6 @@ export function VideoEditor() {
         onClose={() => setShowImportTimelineModal(false)}
         onImport={handleImportTimeline}
       />
-      
-      
-      {/* IC-LORA HIDDEN - IC-LoRA panel hidden because IC-LoRA is broken on server
-      {(() => {
-        const sourceClip = icLoraSourceClipId ? clips.find(c => c.id === icLoraSourceClipId) : null
-        const sourceAsset = sourceClip?.assetId ? assets.find(a => a.id === sourceClip.assetId) : null
-        const activeUrl = sourceAsset?.takes?.[sourceAsset.activeTakeIndex ?? sourceAsset.takes.length - 1]?.url || sourceAsset?.url
-        const activePath = sourceAsset?.takes?.[sourceAsset.activeTakeIndex ?? sourceAsset.takes.length - 1]?.path || sourceAsset?.path
-        return (
-          <ICLoraPanel
-            isOpen={showICLoraPanel}
-            onClose={() => { setShowICLoraPanel(false); setIcLoraSourceClipId(null) }}
-            initialVideoUrl={activeUrl}
-            initialVideoPath={activePath}
-            initialClipName={sourceAsset?.prompt || sourceClip?.importedName || undefined}
-            sourceClipId={icLoraSourceClipId}
-            onResult={handleICLoraResult}
-          />
-        )
-      })()}
-      */}
       
       {selectedGap && tracks[selectedGap.trackIndex]?.kind !== 'audio' && (
         <GapGenerationModal

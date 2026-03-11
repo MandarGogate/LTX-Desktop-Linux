@@ -74,6 +74,7 @@ class AppSettings(SettingsBaseModel):
     gemini_api_key: str = ""
     seed_locked: bool = False
     locked_seed: int = 42
+    models_dir: str = ""
 
     @field_validator("prompt_cache_size", mode="before")
     @classmethod
@@ -145,6 +146,7 @@ class SettingsResponse(SettingsBaseModel):
     has_gemini_api_key: bool = False
     seed_locked: bool = False
     locked_seed: int = 42
+    models_dir: str = ""
 
 
 def to_settings_response(settings: AppSettings) -> SettingsResponse:
@@ -155,6 +157,7 @@ def to_settings_response(settings: AppSettings) -> SettingsResponse:
     data["has_ltx_api_key"] = bool(ltx_key)
     data["has_fal_api_key"] = bool(fal_key)
     data["has_gemini_api_key"] = bool(gemini_key)
+    # models_dir passes through as-is (not secret)
     return SettingsResponse.model_validate(data)
 
 

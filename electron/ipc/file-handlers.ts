@@ -188,10 +188,19 @@ export function registerFileHandlers(): void {
     return getProjectAssetsPath()
   })
 
-  ipcMain.handle('set-project-assets-path', async (_event, newPath: string) => {
+  ipcMain.handle('open-project-assets-path-change-dialog', async () => {
     try {
-      setProjectAssetsPath(newPath)
-      return { success: true }
+      const mainWindow = getMainWindow()
+      if (!mainWindow) return { success: false, error: 'No window' }
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: 'Select Project Assets Path',
+        properties: ['openDirectory', 'createDirectory'],
+      })
+      if (result.canceled || result.filePaths.length === 0) return { success: false, error: 'cancelled' }
+      const selectedPath = path.resolve(result.filePaths[0])
+      setProjectAssetsPath(selectedPath)
+      approvePath(selectedPath)
+      return { success: true, path: selectedPath }
     } catch (error) {
       return { success: false, error: String(error) }
     }

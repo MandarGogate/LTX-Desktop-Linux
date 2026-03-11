@@ -51,8 +51,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('copy-to-project-assets', srcPath, projectId),
   getProjectAssetsPath: (): Promise<string> =>
     ipcRenderer.invoke('get-project-assets-path'),
-  setProjectAssetsPath: (newPath: string): Promise<{ success: boolean; error?: string }> =>
-    ipcRenderer.invoke('set-project-assets-path', newPath),
+  openProjectAssetsPathChangeDialog: (): Promise<{ success: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('open-project-assets-path-change-dialog'),
 
   // File save/export
   showSaveDialog: (options: { title?: string; defaultPath?: string; filters?: { name: string; extensions: string[] }[] }): Promise<string | null> =>
@@ -111,6 +111,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   writeLog: (level: string, message: string): Promise<void> =>
     ipcRenderer.invoke('write-log', level, message),
 
+  // Models directory change (privileged — uses admin token via Electron main process)
+  openModelsDirChangeDialog: (): Promise<{ success: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('open-models-dir-change-dialog'),
+
   // Analytics
   getAnalyticsState: (): Promise<{ analyticsEnabled: boolean; installationId: string }> =>
     ipcRenderer.invoke('get-analytics-state'),
@@ -158,7 +162,7 @@ declare global {
       getDownloadsPath: () => Promise<string>
       copyToProjectAssets: (srcPath: string, projectId: string) => Promise<{ success: boolean; path?: string; url?: string; error?: string }>
       getProjectAssetsPath: () => Promise<string>
-      setProjectAssetsPath: (newPath: string) => Promise<{ success: boolean; error?: string }>
+      openProjectAssetsPathChangeDialog: () => Promise<{ success: boolean; path?: string; error?: string }>
       showSaveDialog: (options: { title?: string; defaultPath?: string; filters?: { name: string; extensions: string[] }[] }) => Promise<string | null>
       saveFile: (filePath: string, data: string, encoding?: string) => Promise<{ success: boolean; path?: string; error?: string }>
       saveBinaryFile: (filePath: string, data: ArrayBuffer) => Promise<{ success: boolean; path?: string; error?: string }>
@@ -182,6 +186,7 @@ declare global {
       onBackendHealthStatus: (cb: (data: BackendHealthStatus) => void) => (() => void)
       extractVideoFrame: (videoUrl: string, seekTime: number, width?: number, quality?: number) => Promise<{ path: string; url: string }>
       writeLog: (level: string, message: string) => Promise<void>
+      openModelsDirChangeDialog: () => Promise<{ success: boolean; path?: string; error?: string }>
       getAnalyticsState: () => Promise<{ analyticsEnabled: boolean; installationId: string }>
       setAnalyticsEnabled: (enabled: boolean) => Promise<void>
       sendAnalyticsEvent: (eventName: string, extraDetails?: Record<string, unknown> | null) => Promise<void>

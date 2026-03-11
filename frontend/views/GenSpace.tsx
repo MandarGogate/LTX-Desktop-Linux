@@ -10,6 +10,8 @@ import type { GenSpaceRetakeSource } from '../contexts/ProjectContext'
 import { useAppSettings } from '../contexts/AppSettingsContext'
 import { useGeneration } from '../hooks/use-generation'
 import { useRetake } from '../hooks/use-retake'
+import { useIcLora } from '../hooks/use-ic-lora'
+import type { ICLoraConditioningType } from '../components/ICLoraPanel'
 import type { Asset } from '../types/project'
 import { GenerationErrorDialog } from '../components/GenerationErrorDialog'
 import { copyToAssetFolder } from '../lib/asset-copy'
@@ -22,16 +24,18 @@ import {
 } from '../lib/api-video-options'
 import { logger } from '../lib/logger'
 import { RetakePanel } from '../components/RetakePanel'
+import { ICLoraPanel, CONDITIONING_TYPES } from '../components/ICLoraPanel'
 import { FreeApiKeyBubble } from '../components/FreeApiKeyBubble'
 
 // Asset card with hover overlays
-function AssetCard({ 
-  asset, 
-  onDelete, 
+function AssetCard({
+  asset,
+  onDelete,
   onPlay,
   onDragStart,
   onCreateVideo,
   onRetake,
+  onIcLora,
   onToggleFavorite
 }: {
   asset: Asset
@@ -40,6 +44,7 @@ function AssetCard({
   onDragStart: (e: React.DragEvent, asset: Asset) => void
   onCreateVideo?: (asset: Asset) => void
   onRetake?: (asset: Asset) => void
+  onIcLora?: (asset: Asset) => void
   onToggleFavorite?: () => void
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -140,13 +145,24 @@ function AssetCard({
               </>
             )}
             {asset.type === 'video' && (
-              <button
-                onClick={(e) => { e.stopPropagation(); onRetake?.(asset) }}
-                className="px-2.5 py-1.5 rounded-lg bg-black/40 backdrop-blur-md text-white hover:bg-black/60 transition-colors flex items-center gap-1.5 text-xs font-medium whitespace-nowrap"
-              >
-                <Scissors className="h-3 w-3" />
-                Retake
-              </button>
+              <>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onRetake?.(asset) }}
+                  className="px-2.5 py-1.5 rounded-lg bg-black/40 backdrop-blur-md text-white hover:bg-black/60 transition-colors flex items-center gap-1.5 text-xs font-medium whitespace-nowrap"
+                >
+                  <Scissors className="h-3 w-3" />
+                  Retake
+                </button>
+                {onIcLora && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onIcLora(asset) }}
+                    className="px-2.5 py-1.5 rounded-lg bg-black/40 backdrop-blur-md text-white hover:bg-black/60 transition-colors flex items-center gap-1.5 text-xs font-medium whitespace-nowrap"
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    IC-LoRA
+                  </button>
+                )}
+              </>
             )}
           </div>
           
@@ -305,6 +321,7 @@ function AspectIcon({ className }: { className?: string }) {
 function PromptBar({
   mode,
   onModeChange,
+  canUseIcLora,
   prompt,
   onPromptChange,
   onGenerate,
@@ -319,9 +336,14 @@ function PromptBar({
   canGenerate,
   buttonLabel,
   buttonIcon,
+  icLoraCondType,
+  onIcLoraCondTypeChange,
+  icLoraStrength,
+  onIcLoraStrengthChange,
 }: {
-  mode: 'image' | 'video' | 'retake'
-  onModeChange: (mode: 'image' | 'video' | 'retake') => void
+  mode: 'image' | 'video' | 'retake' | 'ic-lora'
+  onModeChange: (mode: 'image' | 'video' | 'retake' | 'ic-lora') => void
+  canUseIcLora: boolean
   prompt: string
   onPromptChange: (prompt: string) => void
   onGenerate: () => void
@@ -345,12 +367,17 @@ function PromptBar({
   }
   onSettingsChange: (settings: any) => void
   shouldVideoGenerateWithLtxApi: boolean
+  icLoraCondType?: ICLoraConditioningType
+  onIcLoraCondTypeChange?: (type: ICLoraConditioningType) => void
+  icLoraStrength?: number
+  onIcLoraStrengthChange?: (strength: number) => void
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const audioInputRef = useRef<HTMLInputElement>(null)
   const [isDragOver, setIsDragOver] = useState(false)
   const [isAudioDragOver, setIsAudioDragOver] = useState(false)
   const isRetake = mode === 'retake'
+  const isIcLora = mode === 'ic-lora'
   const LOCAL_MAX_DURATION: Record<string, number> = { '540p': 20, '720p': 10, '1080p': 5 }
   const localMaxDuration = LOCAL_MAX_DURATION[settings.videoResolution] ?? 20
   const videoDurationOptions = shouldVideoGenerateWithLtxApi
@@ -441,7 +468,7 @@ function PromptBar({
       {/* Top row: Image ref | Prompt | Generate */}
       <div className="flex items-start">
         {/* Input image drop zone — video mode only (I2V) */}
-        {mode === 'video' && !isRetake && (
+        {mode === 'video' && !isRetake && !isIcLora && (
           <div
             className={`relative w-10 h-10 mx-2 mt-2 rounded-lg border-2 border-dashed transition-colors flex items-center justify-center flex-shrink-0 cursor-pointer ${
               isDragOver ? 'border-blue-500 bg-blue-500/10' : 'border-zinc-700 hover:border-zinc-500'
@@ -475,7 +502,7 @@ function PromptBar({
         )}
 
         {/* Audio drop zone — only in video mode */}
-        {mode === 'video' && !isRetake && (
+        {mode === 'video' && !isRetake && !isIcLora && (
           <div
             className={`relative w-10 h-10 mt-2 rounded-lg border-2 border-dashed transition-colors flex items-center justify-center flex-shrink-0 cursor-pointer ${
               isAudioDragOver ? 'border-emerald-500 bg-emerald-500/10' : inputAudio ? 'border-emerald-600' : 'border-zinc-700 hover:border-zinc-500'
@@ -517,6 +544,8 @@ function PromptBar({
             onKeyDown={handleKeyDown}
             placeholder={mode === 'retake'
               ? "Describe what should happen in the selected section..."
+              : mode === 'ic-lora'
+                ? "Describe the style or transformation to apply..."
               : mode === 'image'
                 ? "A close-up of a woman talking on the phone..."
                 : "The woman sips from a cup of coffee..."
@@ -533,16 +562,17 @@ function PromptBar({
         <SettingsDropdown
           title="MODE"
           value={mode}
-          onChange={(v) => onModeChange(v as 'image' | 'video' | 'retake')}
+          onChange={(v) => onModeChange(v as 'image' | 'video' | 'retake' | 'ic-lora')}
           options={[
             { value: 'image', label: 'Generate Images', icon: <Image className="h-4 w-4" /> },
             { value: 'video', label: 'Generate Videos', icon: <Video className="h-4 w-4" /> },
             { value: 'retake', label: 'Retake', icon: <Scissors className="h-4 w-4" /> },
+            ...(canUseIcLora ? [{ value: 'ic-lora', label: 'IC-LoRA', icon: <Sparkles className="h-4 w-4" /> }] : []),
           ]}
           trigger={
             <>
-              {mode === 'image' ? <Image className="h-3.5 w-3.5" /> : mode === 'retake' ? <Scissors className="h-3.5 w-3.5" /> : <Video className="h-3.5 w-3.5" />}
-              <span className="text-zinc-300 font-medium">{mode === 'image' ? 'Image' : mode === 'retake' ? 'Retake' : 'Video'}</span>
+              {mode === 'image' ? <Image className="h-3.5 w-3.5" /> : mode === 'retake' ? <Scissors className="h-3.5 w-3.5" /> : mode === 'ic-lora' ? <Sparkles className="h-3.5 w-3.5" /> : <Video className="h-3.5 w-3.5" />}
+              <span className="text-zinc-300 font-medium">{mode === 'image' ? 'Image' : mode === 'retake' ? 'Retake' : mode === 'ic-lora' ? 'IC-LoRA' : 'Video'}</span>
               <ChevronUp className="h-3 w-3 text-zinc-500" />
             </>
           }
@@ -552,6 +582,42 @@ function PromptBar({
         
         {isRetake ? (
           <div className="text-[10px] text-zinc-500 pr-2">Trim in the panel above, then retake</div>
+        ) : isIcLora ? (
+          <>
+            <SettingsDropdown
+              title="CONDITIONING TYPE"
+              value={icLoraCondType || 'canny'}
+              onChange={(v) => onIcLoraCondTypeChange?.(v as ICLoraConditioningType)}
+              options={CONDITIONING_TYPES.map(ct => ({ value: ct.value, label: ct.label }))}
+              trigger={
+                <>
+                  <span className="text-zinc-300 font-medium">{CONDITIONING_TYPES.find(ct => ct.value === icLoraCondType)?.label || 'Canny Edges'}</span>
+                  <ChevronUp className="h-3 w-3 text-zinc-500" />
+                </>
+              }
+            />
+            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+            <SettingsDropdown
+              title="STRENGTH"
+              value={String(icLoraStrength ?? 1.0)}
+              onChange={(v) => onIcLoraStrengthChange?.(parseFloat(v))}
+              options={[
+                { value: '0.5', label: '0.50' },
+                { value: '0.75', label: '0.75' },
+                { value: '1', label: '1.00' },
+                { value: '1.25', label: '1.25' },
+                { value: '1.5', label: '1.50' },
+                { value: '2', label: '2.00' },
+              ]}
+              trigger={
+                <>
+                  <span className="text-zinc-500 text-[10px]">STR</span>
+                  <span className="text-zinc-300 font-medium">{(icLoraStrength ?? 1.0).toFixed(2)}</span>
+                  <ChevronUp className="h-3 w-3 text-zinc-500" />
+                </>
+              }
+            />
+          </>
         ) : mode === 'image' ? (
           <>
             {/* Model indicator */}
@@ -782,9 +848,27 @@ const DEFAULT_VIDEO_SETTINGS = {
 }
 
 export function GenSpace() {
-  const { currentProject, currentProjectId, addAsset, addTakeToAsset, deleteAsset, toggleFavorite, genSpaceEditImageUrl, setGenSpaceEditImageUrl, setGenSpaceEditMode, genSpaceAudioUrl, setGenSpaceAudioUrl, genSpaceRetakeSource, setGenSpaceRetakeSource, setPendingRetakeUpdate } = useProjects()
+  const {
+    currentProject,
+    currentProjectId,
+    addAsset,
+    addTakeToAsset,
+    deleteAsset,
+    toggleFavorite,
+    genSpaceEditImageUrl,
+    setGenSpaceEditImageUrl,
+    setGenSpaceEditMode,
+    genSpaceAudioUrl,
+    setGenSpaceAudioUrl,
+    genSpaceRetakeSource,
+    setGenSpaceRetakeSource,
+    setPendingRetakeUpdate,
+    genSpaceIcLoraSource,
+    setGenSpaceIcLoraSource,
+    setPendingIcLoraUpdate,
+  } = useProjects()
   const { shouldVideoGenerateWithLtxApi, forceApiGenerations, settings: appSettings } = useAppSettings()
-  const [mode, setMode] = useState<'image' | 'video' | 'retake'>('video')
+  const [mode, setMode] = useState<'image' | 'video' | 'retake' | 'ic-lora'>('video')
   const [prompt, setPrompt] = useState('')
   const [inputImage, setInputImage] = useState<string | null>(null)
   const [inputAudio, setInputAudio] = useState<string | null>(null)
@@ -803,6 +887,14 @@ export function GenSpace() {
       startTime: number
       duration: number
       videoDuration: number
+    }
+  } | null>(null)
+  const icLoraSubmissionRef = useRef<{
+    prompt: string
+    input: {
+      videoPath: string
+      conditioningType: ICLoraConditioningType
+      conditioningStrength: number
     }
   } | null>(null)
   const [settings, setSettings] = useState(() => ({ ...DEFAULT_VIDEO_SETTINGS }))
@@ -852,6 +944,33 @@ export function GenSpace() {
     duration?: number
   }>({ videoUrl: null, videoPath: null, duration: undefined })
   const [activeRetakeSource, setActiveRetakeSource] = useState<GenSpaceRetakeSource | null>(null)
+  const [activeIcLoraSource, setActiveIcLoraSource] = useState<{
+    assetId?: string
+    linkedClipIds?: string[]
+  } | null>(null)
+  const [icLoraInput, setIcLoraInput] = useState({
+    videoUrl: null as string | null,
+    videoPath: null as string | null,
+    conditioningType: 'canny' as ICLoraConditioningType,
+    conditioningStrength: 1.0,
+    ready: false,
+  })
+  const [icLoraPanelKey, setIcLoraPanelKey] = useState(0)
+  const [icLoraCondType, setIcLoraCondType] = useState<ICLoraConditioningType>('canny')
+  const [icLoraStrength, setIcLoraStrength] = useState(1.0)
+  const [icLoraInitial, setIcLoraInitial] = useState<{
+    videoUrl: string | null
+    videoPath: string | null
+  }>({ videoUrl: null, videoPath: null })
+
+  const {
+    submitIcLora,
+    resetIcLora,
+    isIcLoraGenerating,
+    icLoraStatus,
+    icLoraError,
+    icLoraResult,
+  } = useIcLora()
   
   // Handle incoming frame from the Video Editor for editing
   useEffect(() => {
@@ -889,6 +1008,32 @@ export function GenSpace() {
   }, [genSpaceRetakeSource, setGenSpaceRetakeSource])
 
   useEffect(() => {
+    if (!genSpaceIcLoraSource) return
+    if (forceApiGenerations) {
+      setGenSpaceIcLoraSource(null)
+      return
+    }
+    setMode('ic-lora')
+    setPrompt('')
+    setActiveIcLoraSource({
+      assetId: genSpaceIcLoraSource.assetId,
+      linkedClipIds: genSpaceIcLoraSource.linkedClipIds,
+    })
+    setIcLoraInitial({
+      videoUrl: genSpaceIcLoraSource.videoUrl,
+      videoPath: genSpaceIcLoraSource.videoPath,
+    })
+    setIcLoraPanelKey((prev) => prev + 1)
+    setGenSpaceIcLoraSource(null)
+  }, [genSpaceIcLoraSource, forceApiGenerations, setGenSpaceIcLoraSource])
+
+  useEffect(() => {
+    if (forceApiGenerations && mode === 'ic-lora') {
+      setMode('video')
+    }
+  }, [forceApiGenerations, mode])
+
+  useEffect(() => {
     if (!shouldVideoGenerateWithLtxApi || mode !== 'video') return
     setSettings((prev) => applyForcedVideoSettings({ ...prev, model: 'fast' }))
   }, [applyForcedVideoSettings, mode, shouldVideoGenerateWithLtxApi])
@@ -898,6 +1043,12 @@ export function GenSpace() {
       setLocalError(retakeError)
     }
   }, [retakeError])
+
+  useEffect(() => {
+    if (icLoraError) {
+      setLocalError(icLoraError)
+    }
+  }, [icLoraError])
 
   // Force pro model + resolution when audio is attached (A2V only supports pro @ 1080p 16:9)
   useEffect(() => {
@@ -1027,6 +1178,63 @@ export function GenSpace() {
       resetRetake()
     })()
   }, [retakeResult, isRetaking, currentProjectId, currentProject?.assets, activeRetakeSource, addAsset, addTakeToAsset, setPendingRetakeUpdate, resetRetake])
+
+  useEffect(() => {
+    if (!icLoraResult || !currentProjectId || isIcLoraGenerating) return
+    const submission = icLoraSubmissionRef.current
+    if (!submission) return
+    icLoraSubmissionRef.current = null
+
+    ;(async () => {
+      const copied = await copyToAssetFolder(icLoraResult.videoPath, currentProjectId)
+      const finalPath = copied?.path ?? icLoraResult.videoPath
+      const finalUrl = copied?.url ?? icLoraResult.videoUrl
+
+      if (activeIcLoraSource?.assetId) {
+        const sourceAsset = currentProject?.assets?.find(a => a.id === activeIcLoraSource.assetId)
+        if (sourceAsset) {
+          const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
+          addTakeToAsset(currentProjectId, sourceAsset.id, {
+            url: finalUrl,
+            path: finalPath,
+            createdAt: Date.now(),
+          })
+          if (activeIcLoraSource.linkedClipIds?.length) {
+            setPendingIcLoraUpdate({
+              assetId: sourceAsset.id,
+              clipIds: activeIcLoraSource.linkedClipIds,
+              newTakeIndex,
+            })
+          }
+        }
+      } else {
+        addAsset(currentProjectId, {
+          type: 'video',
+          path: finalPath,
+          url: finalUrl,
+          prompt: submission.prompt,
+          resolution: '',
+          generationParams: {
+            mode: 'ic-lora',
+            prompt: submission.prompt,
+            model: 'fast',
+            duration: 0,
+            resolution: '',
+            fps: 24,
+            audio: false,
+            cameraMotion: 'none',
+            icLoraVideoPath: submission.input.videoPath,
+            icLoraConditioningType: submission.input.conditioningType,
+            icLoraConditioningStrength: submission.input.conditioningStrength,
+          },
+          takes: [{ url: finalUrl, path: finalPath, createdAt: Date.now() }],
+          activeTakeIndex: 0,
+        })
+      }
+
+      setActiveIcLoraSource(null)
+    })()
+  }, [icLoraResult, isIcLoraGenerating, currentProjectId, currentProject?.assets, activeIcLoraSource, addAsset, addTakeToAsset, setPendingIcLoraUpdate])
   
   // When image generation/editing completes, add all images to project assets
   useEffect(() => {
@@ -1073,6 +1281,25 @@ export function GenSpace() {
   }, [imageUrls, imagePaths, currentProjectId, isGenerating])
   
   const handleGenerate = async () => {
+    if (mode === 'ic-lora') {
+      if (!prompt.trim() || !icLoraInput.videoPath || !icLoraInput.ready) return
+      icLoraSubmissionRef.current = {
+        prompt,
+        input: {
+          videoPath: icLoraInput.videoPath,
+          conditioningType: icLoraCondType,
+          conditioningStrength: icLoraStrength,
+        },
+      }
+      await submitIcLora({
+        videoPath: icLoraInput.videoPath,
+        conditioningType: icLoraCondType,
+        conditioningStrength: icLoraStrength,
+        prompt,
+      })
+      return
+    }
+
     if (mode === 'retake') {
       if (!retakeInput.videoPath || retakeInput.duration < 2) return
       retakeSubmissionRef.current = {
@@ -1173,15 +1400,29 @@ export function GenSpace() {
     setRetakePanelKey((prev) => prev + 1)
   }
 
+  const handleIcLora = (videoAsset: Asset) => {
+    if (forceApiGenerations) return
+    setMode('ic-lora')
+    setPrompt('')
+    setActiveIcLoraSource(null)
+    setIcLoraInitial({ videoUrl: videoAsset.url, videoPath: videoAsset.path })
+    setIcLoraPanelKey((prev) => prev + 1)
+  }
+
   const isRetakeMode = mode === 'retake'
+  const isIcLoraMode = mode === 'ic-lora'
   const canSubmit = isRetakeMode
     ? retakeInput.ready && !!retakeInput.videoPath && !isRetaking
-    : !!prompt.trim()
-  const promptButtonLabel = isRetakeMode ? 'Retake' : 'Generate'
+    : isIcLoraMode
+      ? !!prompt.trim() && icLoraInput.ready && !!icLoraInput.videoPath && !isIcLoraGenerating
+      : !!prompt.trim()
+  const promptButtonLabel = isRetakeMode ? 'Retake' : isIcLoraMode ? 'Generate' : 'Generate'
   const promptButtonIcon = isRetakeMode
     ? <Scissors className="h-3.5 w-3.5" />
+    : isIcLoraMode
+      ? <Sparkles className="h-3.5 w-3.5" />
     : <Sparkles className={`h-3.5 w-3.5 ${isGenerating ? 'animate-pulse' : ''}`} />
-  const promptGenerating = isRetakeMode ? isRetaking : isGenerating
+  const promptGenerating = isRetakeMode ? isRetaking : isIcLoraMode ? isIcLoraGenerating : isGenerating
   
   // Close size menu on click outside
   useEffect(() => {
@@ -1198,6 +1439,7 @@ export function GenSpace() {
 
   const filteredAssets = showFavorites ? assets.filter(a => a.favorite) : assets
   const favoriteCount = assets.filter(a => a.favorite).length
+  const isLibraryMode = mode === 'video' || mode === 'image'
 
   // Navigation for the asset preview modal
   const selectedIndex = selectedAsset ? filteredAssets.findIndex(a => a.id === selectedAsset.id) : -1
@@ -1228,7 +1470,7 @@ export function GenSpace() {
     <div className="h-full relative bg-zinc-950">
 
       {/* Empty state */}
-      {mode !== 'retake' && assets.length === 0 && !isGenerating && (
+      {isLibraryMode && assets.length === 0 && !isGenerating && (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none">
           <div className="w-24 h-24 rounded-2xl border-2 border-dashed border-zinc-700 flex items-center justify-center mb-4">
             <Sparkles className="h-10 w-10 text-zinc-600" />
@@ -1242,7 +1484,7 @@ export function GenSpace() {
       )}
 
       {/* No favorites empty state */}
-      {mode !== 'retake' && showFavorites && filteredAssets.length === 0 && assets.length > 0 && (
+      {isLibraryMode && showFavorites && filteredAssets.length === 0 && assets.length > 0 && (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none">
           <Heart className="h-12 w-12 text-zinc-700 mb-4" />
           <h3 className="text-lg font-semibold text-white mb-2">No favorites yet</h3>
@@ -1253,7 +1495,7 @@ export function GenSpace() {
       )}
 
       {/* Assets area — full width, no background, above the prompt bar */}
-      {mode !== 'retake' && (assets.length > 0 || isGenerating) && (
+      {isLibraryMode && (assets.length > 0 || isGenerating) && (
         <div className="absolute inset-x-0 top-0 bottom-[160px] flex flex-col px-4 pt-4">
           {/* Top bar */}
           <div className="flex items-center justify-end pb-2 gap-2">
@@ -1349,6 +1591,7 @@ export function GenSpace() {
                   onDragStart={handleDragStart}
                   onCreateVideo={handleCreateVideo}
                   onRetake={handleRetake}
+                  onIcLora={!forceApiGenerations ? handleIcLora : undefined}
                   onToggleFavorite={() => currentProjectId && toggleFavorite(currentProjectId, asset.id)}
                 />
               ))}
@@ -1372,6 +1615,26 @@ export function GenSpace() {
         </div>
       )}
 
+      {mode === 'ic-lora' && !forceApiGenerations && (
+        <div className="absolute inset-x-0 top-0 bottom-[160px] px-4 pt-4 pb-4 flex flex-col overflow-hidden">
+          <ICLoraPanel
+            initialVideoUrl={icLoraInitial.videoUrl}
+            initialVideoPath={icLoraInitial.videoPath}
+            resetKey={icLoraPanelKey}
+            fillHeight
+            isProcessing={isIcLoraGenerating}
+            processingStatus={icLoraStatus}
+            conditioningType={icLoraCondType}
+            onConditioningTypeChange={setIcLoraCondType}
+            conditioningStrength={icLoraStrength}
+            onConditioningStrengthChange={setIcLoraStrength}
+            outputVideoUrl={icLoraResult?.videoUrl || null}
+            outputVideoPath={icLoraResult?.videoPath || null}
+            onChange={setIcLoraInput}
+          />
+        </div>
+      )}
+
       {/* Floating prompt panel — wider, responsive, centered */}
       <div className="absolute bottom-5 left-1/2 w-[min(700px,calc(100%-2rem))] -translate-x-1/2">
 
@@ -1385,6 +1648,7 @@ export function GenSpace() {
         <PromptBar
           mode={mode}
           onModeChange={setMode}
+          canUseIcLora={!forceApiGenerations}
           prompt={prompt}
           onPromptChange={setPrompt}
           onGenerate={handleGenerate}
@@ -1399,6 +1663,10 @@ export function GenSpace() {
           settings={settings}
           onSettingsChange={(nextSettings) => setSettings(applyForcedVideoSettings(nextSettings))}
           shouldVideoGenerateWithLtxApi={shouldVideoGenerateWithLtxApi}
+          icLoraCondType={icLoraCondType}
+          onIcLoraCondTypeChange={setIcLoraCondType}
+          icLoraStrength={icLoraStrength}
+          onIcLoraStrengthChange={setIcLoraStrength}
         />
       </div>
       
@@ -1493,7 +1761,14 @@ export function GenSpace() {
       {(error || localError) && (
         <GenerationErrorDialog
           error={(error || localError)!}
-          onDismiss={() => { if (error) reset(); if (localError) { setLocalError(null); resetRetake() } }}
+          onDismiss={() => {
+            if (error) reset()
+            if (localError) {
+              setLocalError(null)
+              resetRetake()
+              resetIcLora()
+            }
+          }}
         />
       )}
     </div>
