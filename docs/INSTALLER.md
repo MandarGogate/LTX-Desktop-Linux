@@ -29,7 +29,7 @@ Before building, ensure you have:
 2. **uv** - https://docs.astral.sh/uv/ (Python package manager)
 3. **git** - needed for git-based Python packages
 4. **Internet connection** (for downloading Python and packages)
-5. **~15GB free space** (for Python environment + build artifacts)
+5. **~15GB free space** (for Python environment + build artifacts; does not include model weights — see [README](../README.md) for full disk space requirements)
 
 ### Platform-Specific
 
@@ -135,7 +135,7 @@ xattr -dr com.apple.quarantine /Applications/LTX\ Desktop.app
 ```
 
 ### Installer is too large
-Expected sizes:
+Expected installer sizes (does not include model weights):
 - **Windows**: ~10GB (PyTorch CUDA ~2.5GB + ML libraries ~5GB + Python ~200MB + Electron ~100MB)
 - **macOS**: ~2-3GB (PyTorch MPS is much smaller than CUDA variant)
 
