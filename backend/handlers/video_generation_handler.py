@@ -63,24 +63,17 @@ class VideoGenerationHandler(StateHandlerBase):
         pipelines_handler: PipelinesHandler,
         text_handler: TextHandler,
         ltx_api_client: LTXAPIClient,
-        outputs_dir: Path,
         config: RuntimeConfig,
-        camera_motion_prompts: dict[str, str],
-        default_negative_prompt: str,
     ) -> None:
-        super().__init__(state, lock)
+        super().__init__(state, lock, config)
         self._generation = generation_handler
         self._pipelines = pipelines_handler
         self._text = text_handler
         self._ltx_api_client = ltx_api_client
-        self._outputs_dir = outputs_dir
-        self._config = config
-        self._camera_motion_prompts = camera_motion_prompts
-        self._default_negative_prompt = default_negative_prompt
 
     def generate(self, req: GenerateVideoRequest) -> GenerateVideoResponse:
         if should_video_generate_with_ltx_api(
-            force_api_generations=self._config.force_api_generations,
+            force_api_generations=self.config.force_api_generations,
             settings=self.state.app_settings,
         ):
             return self._generate_forced_api(req)
@@ -175,7 +168,7 @@ class VideoGenerationHandler(StateHandlerBase):
         if self._generation.is_generation_cancelled():
             raise RuntimeError("Generation was cancelled")
 
-        if not self._config.model_path("checkpoint").exists():
+        if not self.config.model_path("checkpoint").exists():
             raise RuntimeError("Models not downloaded. Please download the AI models first using the Model Status menu.")
 
         total_steps = 8
@@ -188,7 +181,7 @@ class VideoGenerationHandler(StateHandlerBase):
 
         self._generation.update_progress("encoding_text", 10, 0, total_steps)
 
-        enhanced_prompt = prompt + self._camera_motion_prompts.get(camera_motion, "")
+        enhanced_prompt = prompt + self.config.camera_motion_prompts.get(camera_motion, "")
 
         images: list[ImageConditioningInput] = []
         temp_image_path: str | None = None
@@ -280,8 +273,8 @@ class VideoGenerationHandler(StateHandlerBase):
             a2v_state = self._pipelines.load_a2v_pipeline()
             self._generation.start_generation(generation_id)
 
-            enhanced_prompt = req.prompt + self._camera_motion_prompts.get(req.cameraMotion, "")
-            neg = req.negativePrompt if req.negativePrompt else self._default_negative_prompt
+            enhanced_prompt = req.prompt + self.config.camera_motion_prompts.get(req.cameraMotion, "")
+            neg = req.negativePrompt if req.negativePrompt else self.config.default_negative_prompt
 
             images: list[ImageConditioningInput] = []
             if image is not None:
@@ -379,7 +372,7 @@ class VideoGenerationHandler(StateHandlerBase):
 
     def _make_output_path(self) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return self._outputs_dir / f"ltx2_video_{timestamp}_{self._make_generation_id()}.mp4"
+        return self.config.outputs_dir / f"ltx2_video_{timestamp}_{self._make_generation_id()}.mp4"
 
     def _generate_forced_api(self, req: GenerateVideoRequest) -> GenerateVideoResponse:
         if self._generation.is_generation_running():

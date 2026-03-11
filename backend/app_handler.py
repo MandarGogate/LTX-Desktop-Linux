@@ -108,7 +108,7 @@ class AppHandler:
         self.settings = SettingsHandler(
             state=self.state,
             lock=self._lock,
-            settings_file=config.settings_file,
+            config=config,
         )
         self.settings.load_settings(default_settings)
 
@@ -144,11 +144,9 @@ class AppHandler:
             a2v_pipeline_class=a2v_pipeline_class,
             retake_pipeline_class=retake_pipeline_class,
             config=config,
-            outputs_dir=config.outputs_dir,
-            device=config.device,
         )
 
-        self.generation = GenerationHandler(state=self.state, lock=self._lock)
+        self.generation = GenerationHandler(state=self.state, lock=self._lock, config=config)
 
         self.video_generation = VideoGenerationHandler(
             state=self.state,
@@ -157,10 +155,7 @@ class AppHandler:
             pipelines_handler=self.pipelines,
             text_handler=self.text,
             ltx_api_client=ltx_api_client,
-            outputs_dir=config.outputs_dir,
             config=config,
-            camera_motion_prompts=config.camera_motion_prompts,
-            default_negative_prompt=config.default_negative_prompt,
         )
 
         self.image_generation = ImageGenerationHandler(
@@ -168,7 +163,6 @@ class AppHandler:
             lock=self._lock,
             generation_handler=self.generation,
             pipelines_handler=self.pipelines,
-            outputs_dir=config.outputs_dir,
             config=config,
             zit_api_client=zit_api_client,
         )
@@ -180,7 +174,6 @@ class AppHandler:
             pipelines_handler=self.pipelines,
             gpu_info=gpu_info,
             config=config,
-            use_sage_attention=config.use_sage_attention,
         )
 
         self.runtime_policy = RuntimePolicyHandler(config=config)
@@ -188,6 +181,7 @@ class AppHandler:
         self.suggest_gap_prompt = SuggestGapPromptHandler(
             state=self.state,
             lock=self._lock,
+            config=config,
             http=http,
         )
 
@@ -199,7 +193,6 @@ class AppHandler:
             generation_handler=self.generation,
             pipelines_handler=self.pipelines,
             text_handler=self.text,
-            outputs_dir=config.outputs_dir,
         )
 
         self.ic_lora = IcLoraHandler(
@@ -210,8 +203,7 @@ class AppHandler:
             text_handler=self.text,
             video_processor=video_processor,
             ic_lora_model_downloader=ic_lora_model_downloader,
-            ic_lora_dir=config.ic_lora_dir,
-            outputs_dir=config.outputs_dir,
+            config=config,
         )
 
         self.downloads.cleanup_downloading_dir()

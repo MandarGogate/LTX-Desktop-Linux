@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
+from typing import TYPE_CHECKING
 
 from api_types import (
     IcLoraDownloadRequest,
@@ -28,6 +29,9 @@ from handlers.text_handler import TextHandler
 from services.interfaces import IcLoraModelDownloader, VideoProcessor
 from state.app_state_types import AppState
 
+if TYPE_CHECKING:
+    from runtime_config.runtime_config import RuntimeConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,25 +45,22 @@ class IcLoraHandler(StateHandlerBase):
         text_handler: TextHandler,
         video_processor: VideoProcessor,
         ic_lora_model_downloader: IcLoraModelDownloader,
-        ic_lora_dir: Path,
-        outputs_dir: Path,
+        config: RuntimeConfig,
     ) -> None:
-        super().__init__(state, lock)
+        super().__init__(state, lock, config)
         self._generation = generation_handler
         self._pipelines = pipelines_handler
         self._text = text_handler
         self._video_processor = video_processor
         self._ic_lora_model_downloader = ic_lora_model_downloader
-        self._ic_lora_dir = ic_lora_dir
-        self._outputs_dir = outputs_dir
 
     def list_models(self) -> IcLoraListResponse:
-        models = self._ic_lora_model_downloader.list_models(self._ic_lora_dir)
-        return IcLoraListResponse(models=[IcLoraModel(**model) for model in models], directory=str(self._ic_lora_dir))
+        models = self._ic_lora_model_downloader.list_models(self.config.ic_lora_dir)
+        return IcLoraListResponse(models=[IcLoraModel(**model) for model in models], directory=str(self.config.ic_lora_dir))
 
     def download_model(self, req: IcLoraDownloadRequest) -> IcLoraDownloadResponse:
         try:
-            payload = self._ic_lora_model_downloader.download_model(req.model, self._ic_lora_dir)
+            payload = self._ic_lora_model_downloader.download_model(req.model, self.config.ic_lora_dir)
             return IcLoraDownloadResponse(**payload)
         except ValueError as exc:
             logger.warning("IC-LoRA download request rejected for model '%s': %s", req.model, exc)
@@ -125,7 +126,7 @@ class IcLoraHandler(StateHandlerBase):
             if not cap.isOpened():
                 raise HTTPError(400, f"Cannot open video: {video_path}")
 
-            control_video_path = str(self._outputs_dir / f"_control_{req.conditioning_type}_{uuid.uuid4().hex[:8]}.mp4")
+            control_video_path = str(self.config.outputs_dir / f"_control_{req.conditioning_type}_{uuid.uuid4().hex[:8]}.mp4")
             writer = self._video_processor.create_writer(
                 control_video_path,
                 fourcc="mp4v",
@@ -160,7 +161,7 @@ class IcLoraHandler(StateHandlerBase):
 
             height = round(req.height / 64) * 64
             width = round(req.width / 64) * 64
-            output_path = self._outputs_dir / f"ic_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
+            output_path = self.config.outputs_dir / f"ic_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
 
             ic_state.pipeline.generate(
                 prompt=req.prompt,

@@ -22,8 +22,7 @@ class ModelsHandler(StateHandlerBase):
         lock: RLock,
         config: RuntimeConfig,
     ) -> None:
-        super().__init__(state, lock)
-        self._config = config
+        super().__init__(state, lock, config)
 
     @staticmethod
     def _path_size(path: Path, is_folder: bool) -> int:
@@ -34,8 +33,8 @@ class ModelsHandler(StateHandlerBase):
     def _scan_available_files(self) -> AvailableFiles:
         files: AvailableFiles = {}
         for model_type in MODEL_FILE_ORDER:
-            spec = self._config.spec_for(model_type)
-            path = self._config.model_path(model_type)
+            spec = self.config.spec_for(model_type)
+            path = self.config.model_path(model_type)
             if spec.is_folder:
                 ready = path.exists() and any(path.iterdir()) if path.exists() else False
                 files[model_type] = path if ready else None
@@ -52,7 +51,7 @@ class ModelsHandler(StateHandlerBase):
         files = self.refresh_available_files()
         text_encoder_path = files["text_encoder"]
         exists = text_encoder_path is not None
-        text_spec = self._config.spec_for("text_encoder")
+        text_spec = self.config.spec_for("text_encoder")
         size_bytes = self._path_size(text_encoder_path, is_folder=True) if exists else 0
         expected = text_spec.expected_size_bytes
 
@@ -86,13 +85,13 @@ class ModelsHandler(StateHandlerBase):
         total_size = 0
         downloaded_size = 0
         required_types = resolve_required_model_types(
-            self._config.required_model_types,
+            self.config.required_model_types,
             has_api_key,
             settings.use_local_text_encoder,
         )
 
         for model_type in MODEL_FILE_ORDER:
-            spec = self._config.spec_for(model_type)
+            spec = self.config.spec_for(model_type)
             path = files[model_type]
             exists = path is not None
             actual_size = self._path_size(path, is_folder=spec.is_folder) if exists else 0
@@ -130,7 +129,7 @@ class ModelsHandler(StateHandlerBase):
             downloaded_size=downloaded_size,
             total_size_gb=round(total_size / (1024**3), 1),
             downloaded_size_gb=round(downloaded_size / (1024**3), 1),
-            models_path=str(self._config.models_dir),
+            models_path=str(self.config.models_dir),
             has_api_key=has_api_key,
             text_encoder_status=self.get_text_encoder_status(),
             use_local_text_encoder=settings.use_local_text_encoder,

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+from threading import RLock
+from typing import TYPE_CHECKING
 from typing import Literal
 
 from api_types import CancelResponse, GenerationProgressResponse
 from handlers.base import StateHandlerBase, with_state_lock
 from state.app_state_types import (
+    AppState,
     GenerationCancelled,
     GenerationComplete,
     GenerationError,
@@ -17,11 +20,17 @@ from state.app_state_types import (
     GpuSlot,
 )
 
+if TYPE_CHECKING:
+    from runtime_config.runtime_config import RuntimeConfig
+
 logger = logging.getLogger(__name__)
 GenerationSlot = Literal["gpu", "api"]
 
 
 class GenerationHandler(StateHandlerBase):
+    def __init__(self, state: AppState, lock: RLock, config: RuntimeConfig) -> None:
+        super().__init__(state, lock, config)
+
     @with_state_lock
     def start_generation(self, generation_id: str) -> None:
         if self.is_generation_running():

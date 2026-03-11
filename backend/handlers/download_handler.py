@@ -32,11 +32,10 @@ class DownloadHandler(StateHandlerBase):
         task_runner: TaskRunner,
         config: RuntimeConfig,
     ) -> None:
-        super().__init__(state, lock)
+        super().__init__(state, lock, config)
         self._models_handler = models_handler
         self._model_downloader = model_downloader
         self._task_runner = task_runner
-        self._config = config
 
     @with_state_lock
     def is_download_running(self) -> bool:
@@ -118,7 +117,7 @@ class DownloadHandler(StateHandlerBase):
                 status = "downloading" if self.state.is_downloading else "complete"
                 total_files = len(files)
                 for file_type, file_state in files.items():
-                    size = self._config.spec_for(file_type).expected_size_bytes
+                    size = self.config.spec_for(file_type).expected_size_bytes
                     total_bytes += size
                     match file_state:
                         case FileDownloadCompleted():
@@ -149,24 +148,24 @@ class DownloadHandler(StateHandlerBase):
 
     def _move_to_final(self, file_type: ModelFileType) -> None:
         """Move downloaded file/folder from downloading dir to final location."""
-        spec = self._config.spec_for(file_type)
+        spec = self.config.spec_for(file_type)
 
         if spec.is_folder:
-            src = self._config.downloading_dir / spec.relative_path
-            dst = self._config.model_path(file_type)
+            src = self.config.downloading_dir / spec.relative_path
+            dst = self.config.model_path(file_type)
             if dst.exists():
                 shutil.rmtree(dst)
             src.rename(dst)
         else:
-            src = self._config.downloading_dir / spec.relative_path
-            dst = self._config.model_path(file_type)
+            src = self.config.downloading_dir / spec.relative_path
+            dst = self.config.model_path(file_type)
             if dst.exists():
                 dst.unlink()
             src.rename(dst)
 
     def cleanup_downloading_dir(self) -> None:
         """Remove stale .downloading/ dir (leftover from crashed downloads)."""
-        downloading = self._config.downloading_dir
+        downloading = self.config.downloading_dir
         if downloading.exists():
             shutil.rmtree(downloading)
 
@@ -178,7 +177,7 @@ class DownloadHandler(StateHandlerBase):
         with self._lock:
             has_api_key = bool(self.state.app_settings.ltx_api_key.strip())
         required_types = resolve_required_model_types(
-            self._config.required_model_types,
+            self.config.required_model_types,
             has_api_key=has_api_key,
         )
 
@@ -189,7 +188,7 @@ class DownloadHandler(StateHandlerBase):
                 continue
             if available[model_type] is not None:
                 continue
-            spec = self._config.spec_for(model_type)
+            spec = self.config.spec_for(model_type)
             files_to_download[model_type] = (spec.name, spec.expected_size_bytes)
 
         if not files_to_download:
@@ -200,24 +199,24 @@ class DownloadHandler(StateHandlerBase):
         self.start_download(files_to_download)
 
         for file_type, (target_name, expected_size) in files_to_download.items():
-            spec = self._config.spec_for(file_type)
+            spec = self.config.spec_for(file_type)
             logger.info("Downloading %s from %s", target_name, spec.repo_id)
             progress_cb = self._make_progress_callback(file_type)
 
             try:
-                self._config.downloading_dir.mkdir(parents=True, exist_ok=True)
+                self.config.downloading_dir.mkdir(parents=True, exist_ok=True)
 
                 if spec.is_folder:
                     self._model_downloader.download_snapshot(
                         repo_id=spec.repo_id,
-                        local_dir=str(self._config.downloading_path(file_type)),
+                        local_dir=str(self.config.downloading_path(file_type)),
                         on_progress=progress_cb,
                     )
                 else:
                     self._model_downloader.download_file(
                         repo_id=spec.repo_id,
                         filename=spec.name,
-                        local_dir=str(self._config.downloading_path(file_type)),
+                        local_dir=str(self.config.downloading_path(file_type)),
                         on_progress=progress_cb,
                     )
 
@@ -250,14 +249,14 @@ class DownloadHandler(StateHandlerBase):
                 return False
 
         def worker() -> None:
-            text_spec = self._config.spec_for("text_encoder")
+            text_spec = self.config.spec_for("text_encoder")
             self.start_download({"text_encoder": (text_spec.name, text_spec.expected_size_bytes)})
             progress_cb = self._make_progress_callback("text_encoder")
             try:
-                self._config.downloading_dir.mkdir(parents=True, exist_ok=True)
+                self.config.downloading_dir.mkdir(parents=True, exist_ok=True)
                 self._model_downloader.download_snapshot(
                     repo_id=text_spec.repo_id,
-                    local_dir=str(self._config.downloading_path("text_encoder")),
+                    local_dir=str(self.config.downloading_path("text_encoder")),
                     on_progress=progress_cb,
                 )
                 self._move_to_final("text_encoder")

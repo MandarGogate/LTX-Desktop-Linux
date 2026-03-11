@@ -31,15 +31,12 @@ class RetakeHandler(StateHandlerBase):
         generation_handler: GenerationHandler,
         pipelines_handler: PipelinesHandler,
         text_handler: TextHandler,
-        outputs_dir: Path,
     ) -> None:
-        super().__init__(state, lock)
+        super().__init__(state, lock, config)
         self._ltx_api_client = ltx_api_client
-        self._config = config
         self._generation = generation_handler
         self._pipelines = pipelines_handler
         self._text = text_handler
-        self._outputs_dir = outputs_dir
 
     def run(self, req: RetakeRequest) -> RetakeResponse:
         video_path = req.video_path
@@ -58,7 +55,7 @@ class RetakeHandler(StateHandlerBase):
             raise HTTPError(400, f"Video file not found: {video_path}")
 
         if should_video_generate_with_ltx_api(
-            force_api_generations=self._config.force_api_generations,
+            force_api_generations=self.config.force_api_generations,
             settings=self.state.app_settings,
         ):
             return self._run_api_retake(
@@ -103,7 +100,7 @@ class RetakeHandler(StateHandlerBase):
             raise HTTPError(exc.status_code, exc.detail) from exc
 
         if result.video_bytes is not None:
-            output = self._outputs_dir / f"retake_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
+            output = self.config.outputs_dir / f"retake_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
             with open(output, "wb") as out:
                 out.write(result.video_bytes)
             return RetakeResponse(status="complete", video_path=str(output))
@@ -138,7 +135,7 @@ class RetakeHandler(StateHandlerBase):
 
         generation_id = uuid.uuid4().hex[:8]
         seed = self._resolve_seed()
-        output_path = self._outputs_dir / f"retake_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{generation_id}.mp4"
+        output_path = self.config.outputs_dir / f"retake_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{generation_id}.mp4"
         regenerate_video, regenerate_audio = self._resolve_retake_mode(mode)
 
         try:
@@ -154,7 +151,7 @@ class RetakeHandler(StateHandlerBase):
                 end_time=end_time,
                 seed=seed,
                 output_path=str(output_path),
-                negative_prompt=self._config.default_negative_prompt,
+                negative_prompt=self.config.default_negative_prompt,
                 num_inference_steps=40,
                 video_guider_params=None,
                 audio_guider_params=None,
