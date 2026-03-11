@@ -96,7 +96,7 @@ linux:
   target:
     - AppImage
     - deb
-  icon: resources/icon.png
+  icon: resources/icons
   category: Video
   artifactName: ${productName}-${arch}.${ext}
 
