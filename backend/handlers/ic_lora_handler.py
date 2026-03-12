@@ -66,27 +66,17 @@ class IcLoraHandler(StateHandlerBase):
                 if ic_state is None:
                     raise HTTPError(500, "Depth conditioning requires loaded IC-LoRA resources")
                 return self._video_processor.apply_depth(frame, ic_state.depth_pipeline)
-            case "pose":
-                if ic_state is None:
-                    raise HTTPError(500, "Pose conditioning requires loaded IC-LoRA resources")
-                return self._video_processor.apply_pose(frame, ic_state.pose_pipeline)
             case _:
                 raise HTTPError(400, f"Unsupported conditioning_type: {conditioning_type}")
 
-    def _require_ic_lora_model_paths(self) -> tuple[Path, Path, Path, Path]:
+    def _require_ic_lora_model_paths(self) -> tuple[Path, Path]:
         lora_path = resolve_model_path(self.models_dir, self.config.model_download_specs,"ic_lora")
         depth_model_path = resolve_model_path(self.models_dir, self.config.model_download_specs,"depth_processor")
-        person_detector_model_path = resolve_model_path(self.models_dir, self.config.model_download_specs,"person_detector")
-        pose_model_path = resolve_model_path(self.models_dir, self.config.model_download_specs,"pose_processor")
         if not lora_path.exists():
             raise HTTPError(400, f"IC-LoRA model not found: {lora_path}")
         if not depth_model_path.exists():
             raise HTTPError(400, f"Depth processor model not found: {depth_model_path}")
-        if not person_detector_model_path.exists():
-            raise HTTPError(400, f"Person detector model not found: {person_detector_model_path}")
-        if not pose_model_path.exists():
-            raise HTTPError(400, f"Pose processor model not found: {pose_model_path}")
-        return lora_path, depth_model_path, person_detector_model_path, pose_model_path
+        return lora_path, depth_model_path
 
     def extract_conditioning(self, req: IcLoraExtractRequest) -> IcLoraExtractResponse:
         video_file = Path(req.video_path)
@@ -103,13 +93,11 @@ class IcLoraHandler(StateHandlerBase):
             raise HTTPError(400, "Could not read frame from video")
 
         ic_state: ICLoraState | None = None
-        if req.conditioning_type in {"depth", "pose"}:
-            lora_path, depth_model_path, person_detector_model_path, pose_model_path = self._require_ic_lora_model_paths()
+        if req.conditioning_type == "depth":
+            lora_path, depth_model_path = self._require_ic_lora_model_paths()
             ic_state = self._pipelines.load_ic_lora(
                 str(lora_path),
                 str(depth_model_path),
-                str(person_detector_model_path),
-                str(pose_model_path),
             )
 
         result = self._build_conditioning_frame(frame, req.conditioning_type, ic_state)
@@ -137,7 +125,7 @@ class IcLoraHandler(StateHandlerBase):
         video_path = Path(req.video_path)
         if not video_path.exists():
             raise HTTPError(400, f"Video not found: {req.video_path}")
-        lora_path, depth_model_path, person_detector_model_path, pose_model_path = self._require_ic_lora_model_paths()
+        lora_path, depth_model_path = self._require_ic_lora_model_paths()
 
         generation_id = uuid.uuid4().hex[:8]
         t_total_start = time.perf_counter()
@@ -148,8 +136,6 @@ class IcLoraHandler(StateHandlerBase):
             ic_state = self._pipelines.load_ic_lora(
                 str(lora_path),
                 str(depth_model_path),
-                str(person_detector_model_path),
-                str(pose_model_path),
             )
             t_load_end = time.perf_counter()
             logger.info("[ic-lora] Pipeline load: %.2fs", t_load_end - t_load_start)
@@ -229,8 +215,9 @@ class IcLoraHandler(StateHandlerBase):
             self._generation.update_progress("inference", 15, 0, 1)
 
             width = 768
-            height = round(width * input_height / input_width / 64) * 64
-            height = max(height, 64)
+            height = round(width * input_height / input_width / 128) * 128
+            height = max(height, 128)
+
             output_path = (
                 self.config.outputs_dir / f"ic_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
             )

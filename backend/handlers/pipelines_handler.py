@@ -279,8 +279,6 @@ class PipelinesHandler(StateHandlerBase):
         self,
         lora_path: str,
         depth_model_path: str,
-        person_detector_model_path: str,
-        pose_model_path: str,
     ) -> ICLoraState:
         self._install_text_patches_if_needed()
 
@@ -290,14 +288,10 @@ class PipelinesHandler(StateHandlerBase):
                     active_pipeline=ICLoraState(
                         lora_path=current_lora_path,
                         depth_model_path=current_depth_model_path,
-                        person_detector_model_path=current_person_detector_model_path,
-                        pose_model_path=current_pose_model_path,
                     ) as state
                 ) if (
                     current_lora_path == lora_path
                     and current_depth_model_path == depth_model_path
-                    and current_person_detector_model_path == person_detector_model_path
-                    and current_pose_model_path == pose_model_path
                 ):
                     return state
                 case _:
@@ -313,19 +307,11 @@ class PipelinesHandler(StateHandlerBase):
             self.config.device,
         )
         depth_pipeline = self._depth_processor_pipeline_class.create(depth_model_path, self.config.device)
-        pose_pipeline = self._pose_processor_pipeline_class.create(
-            pose_model_path,
-            person_detector_model_path,
-            self.config.device,
-        )
         state = ICLoraState(
             pipeline=pipeline,
             lora_path=lora_path,
             depth_pipeline=depth_pipeline,
             depth_model_path=depth_model_path,
-            pose_pipeline=pose_pipeline,
-            person_detector_model_path=person_detector_model_path,
-            pose_model_path=pose_model_path,
         )
 
         with self._lock:

@@ -202,30 +202,23 @@ def test_retake_pipeline_eviction(test_state):
     assert isinstance(test_state.state.gpu_slot.active_pipeline, VideoPipelineState)
 
 
-def test_ic_lora_load_includes_depth_and_pose_resources(test_state, fake_services):
+def test_ic_lora_load_includes_depth_resources(test_state, fake_services):
     lora_path = str(_model_path(test_state,"ic_lora"))
     depth_path = str(_model_path(test_state,"depth_processor"))
-    person_detector_path = str(_model_path(test_state,"person_detector"))
-    pose_path = str(_model_path(test_state,"pose_processor"))
 
-    ic_state = test_state.pipelines.load_ic_lora(lora_path, depth_path, person_detector_path, pose_path)
+    ic_state = test_state.pipelines.load_ic_lora(lora_path, depth_path)
 
     assert isinstance(ic_state, ICLoraState)
     assert ic_state.pipeline is fake_services.ic_lora_pipeline
     assert ic_state.depth_pipeline is fake_services.depth_processor_pipeline
-    assert ic_state.pose_pipeline is fake_services.pose_processor_pipeline
     assert ic_state.lora_path == lora_path
     assert ic_state.depth_model_path == depth_path
-    assert ic_state.person_detector_model_path == person_detector_path
-    assert ic_state.pose_model_path == pose_path
 
 
 def test_ic_lora_unload_clears_preprocessing_resources(test_state):
     lora_path = str(_model_path(test_state,"ic_lora"))
     depth_path = str(_model_path(test_state,"depth_processor"))
-    person_detector_path = str(_model_path(test_state,"person_detector"))
-    pose_path = str(_model_path(test_state,"pose_processor"))
-    test_state.pipelines.load_ic_lora(lora_path, depth_path, person_detector_path, pose_path)
+    test_state.pipelines.load_ic_lora(lora_path, depth_path)
 
     assert isinstance(test_state.state.gpu_slot, GpuSlot)
     assert isinstance(test_state.state.gpu_slot.active_pipeline, ICLoraState)
