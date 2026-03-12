@@ -66,7 +66,7 @@ function getInstalledHashPath(): string {
 
 /** Directory where python-embed lives at runtime. */
 export function getPythonDir(): string {
-  if (process.platform === 'win32') {
+  if (process.platform === 'win32' || process.platform === 'linux') {
     if (isDev) {
       return path.join(process.cwd(), 'python-embed')
     }
@@ -81,7 +81,7 @@ export function getPythonDir(): string {
  * Also promotes a staged python-next/ directory if it matches the expected hash.
  */
 export function isPythonReady(): { ready: boolean } {
-  if (process.platform !== 'win32') {
+  if (process.platform === 'darwin') {
     return { ready: true }
   }
 
@@ -112,7 +112,7 @@ export function isPythonReady(): { ready: boolean } {
   const installedHash = readHash(getInstalledHashPath())
 
   if (!bundledHash) {
-    const pythonExe = path.join(getPythonDir(), 'python.exe')
+    const pythonExe = path.join(getPythonDir(), process.platform === 'win32' ? 'python.exe' : 'bin/python3')
     return { ready: fs.existsSync(pythonExe) }
   }
 
@@ -128,7 +128,7 @@ export async function preDownloadPythonForUpdate(
   newVersion: string,
   onProgress?: (progress: PythonSetupProgress) => void
 ): Promise<boolean> {
-  if (process.platform !== 'win32') {
+  if (process.platform === 'darwin') {
     return false
   }
 
@@ -190,7 +190,8 @@ export async function preDownloadPythonForUpdate(
     try {
       await acquireArchive(baseUrl, archivePath, cleanupFiles, progressCb)
     } catch (primaryErr) {
-      const fallbackUrl = newHash ? `${FALLBACK_CDN_BASE}/python-embed-win32/${newHash}/python-embed-win32.tar.gz` : null
+      const prefix = getPythonArchivePrefix()
+      const fallbackUrl = newHash ? `${FALLBACK_CDN_BASE}/${prefix}/${newHash}/${prefix}.tar.gz` : null
       if (!fallbackUrl || isLocalPath(baseUrl)) {
         throw primaryErr
       }
@@ -242,6 +243,16 @@ function readHash(filePath: string): string | null {
 
 const FALLBACK_CDN_BASE = 'https://storage.googleapis.com/ltx-desktop-artifacts'
 
+function getPythonArchivePrefix(): string {
+  if (process.platform === 'win32') return 'python-embed-win32'
+  if (process.platform === 'linux') {
+    if (process.arch === 'x64') return 'python-embed-linux-x64'
+    if (process.arch === 'arm64') return 'python-embed-linux-arm64'
+    throw new Error(`Unsupported Linux architecture: ${process.arch}`)
+  }
+  throw new Error(`Python download is not supported on ${process.platform}`)
+}
+
 function getArchiveBase(): string {
   // LTX_PYTHON_URL is a dev-only override for testing with local archives.
   // Disabled in production to prevent code injection into a signed app.
@@ -255,7 +266,8 @@ function getArchiveBase(): string {
 function getFallbackArchiveUrl(): string | null {
   const hash = readHash(getBundledHashPath())
   if (!hash) return null
-  return `${FALLBACK_CDN_BASE}/python-embed-win32/${hash}/python-embed-win32.tar.gz`
+  const prefix = getPythonArchivePrefix()
+  return `${FALLBACK_CDN_BASE}/${prefix}/${hash}/${prefix}.tar.gz`
 }
 
 function isLocalPath(source: string): boolean {
@@ -314,7 +326,7 @@ export async function downloadPythonEmbed(
 ): Promise<void> {
   const destDir = path.join(app.getPath('userData'), 'python')
   const tempDir = path.join(app.getPath('userData'), 'python-tmp')
-  const archivePath = path.join(app.getPath('userData'), 'python-embed-win32.tar.gz')
+  const archivePath = path.join(app.getPath('userData'), `${getPythonArchivePrefix()}.tar.gz`)
 
   try {
     if (fs.existsSync(tempDir)) {
@@ -395,7 +407,7 @@ async function acquirePartsLocal(
   cleanupFiles: string[],
   onProgress: (progress: PythonSetupProgress) => void
 ): Promise<void> {
-  const manifestPath = path.join(dirPath, 'python-embed-win32.manifest.json')
+  const manifestPath = path.join(dirPath, `${getPythonArchivePrefix()}.manifest.json`)
   const manifest: ArchiveManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
 
   const partPaths: string[] = []
@@ -423,8 +435,9 @@ async function acquirePartsRemote(
   onProgress: (progress: PythonSetupProgress) => void
 ): Promise<void> {
   // Fetch manifest
-  const manifestUrl = `${baseUrl}/python-embed-win32.manifest.json`
-  const manifestDest = path.join(app.getPath('userData'), 'python-embed-win32.manifest.json')
+  const prefix = getPythonArchivePrefix()
+  const manifestUrl = `${baseUrl}/${prefix}.manifest.json`
+  const manifestDest = path.join(app.getPath('userData'), `${prefix}.manifest.json`)
   cleanupFiles.push(manifestDest)
   await downloadFileRaw(manifestUrl, manifestDest)
   const manifest: ArchiveManifest = JSON.parse(fs.readFileSync(manifestDest, 'utf-8'))
