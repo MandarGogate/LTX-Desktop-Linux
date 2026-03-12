@@ -188,7 +188,7 @@ class RetakeResponse(BaseModel):
 class IcLoraExtractResponse(BaseModel):
     conditioning: str
     original: str
-    conditioning_type: Literal["canny", "depth", "pose"]
+    conditioning_type: Literal["canny", "depth"]
     frame_time: float
 
 
@@ -277,7 +277,7 @@ class RetakeRequest(BaseModel):
 
 class IcLoraExtractRequest(BaseModel):
     video_path: str
-    conditioning_type: Literal["canny", "depth", "pose"] = "canny"
+    conditioning_type: Literal["canny", "depth"] = "canny"
     frame_time: float = 0
 
 
@@ -293,7 +293,7 @@ def _default_ic_lora_images() -> list[IcLoraImageInput]:
 
 class IcLoraGenerateRequest(BaseModel):
     video_path: str
-    conditioning_type: Literal["canny", "depth", "pose"]
+    conditioning_type: Literal["canny", "depth"]
     prompt: NonEmptyPrompt
     conditioning_strength: float = 1.0
     num_inference_steps: int = 30

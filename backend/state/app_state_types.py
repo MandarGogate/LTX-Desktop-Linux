@@ -107,9 +107,9 @@ class ICLoraState:
     lora_path: str
     depth_pipeline: DepthProcessorPipeline
     depth_model_path: str
-    pose_pipeline: PoseProcessorPipeline
-    person_detector_model_path: str
-    pose_model_path: str
+    pose_pipeline: PoseProcessorPipeline | None = None
+    person_detector_model_path: str | None = None
+    pose_model_path: str | None = None
     conditioning_cache: ConditioningCache = field(default_factory=ConditioningCache)
 
 
