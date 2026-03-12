@@ -92,6 +92,26 @@ dmg:
       type: link
       path: /Applications
 
+linux:
+  target:
+    - AppImage
+    - deb
+  icon: resources/icons
+  category: Video
+  artifactName: ${productName}-${arch}.${ext}
+
+deb:
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+
 publish:
   provider: github
   owner: Lightricks

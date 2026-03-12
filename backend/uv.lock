@@ -531,6 +531,7 @@ dependencies = [
     { name = "torch", version = "2.10.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "tqdm" },
     { name = "transformers" },
+    { name = "triton", marker = "sys_platform == 'linux'" },
     { name = "triton-windows", marker = "sys_platform == 'win32'" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -574,6 +575,7 @@ requires-dist = [
     { name = "torch", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=2.3.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "tqdm", specifier = ">=4.66.0" },
     { name = "transformers", specifier = ">=4.52,<5" },
+    { name = "triton", marker = "sys_platform == 'linux'" },
     { name = "triton-windows", marker = "sys_platform == 'win32'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]

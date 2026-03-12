@@ -13,20 +13,20 @@ export function initAutoUpdater(
     autoUpdater.allowPrerelease = true
   }
 
-  // On Windows, don't auto-install — we need to pre-download python-embed first.
+  // On Windows/Linux, don't auto-install — we need to pre-download python-embed first.
   // On macOS, python is bundled in the DMG so auto-install is fine.
-  if (process.platform === 'win32') {
+  if (process.platform !== 'darwin') {
     autoUpdater.autoInstallOnAppQuit = false
   }
 
   autoUpdater.on('update-downloaded', async (info: UpdateDownloadedEvent) => {
-    if (process.platform !== 'win32') {
+    if (process.platform === 'darwin') {
       // macOS: python is bundled, just install normally
       autoUpdater.quitAndInstall(false, true)
       return
     }
 
-    // Windows: pre-download python-embed if deps changed before restarting
+    // Windows/Linux: pre-download python-embed if deps changed before restarting
     const newVersion = info.version
     logger.info( `[updater] Update downloaded: v${newVersion}, checking python deps...`)
 
