@@ -79,6 +79,9 @@ mac:
     - target: dmg
       arch:
         - arm64
+    - target: zip
+      arch:
+        - arm64
   icon: resources/icon.icns
   category: public.app-category.video
   artifactName: ${productName}-${arch}.${ext}
