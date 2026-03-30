@@ -13,6 +13,7 @@ from services.interfaces import (
     A2VPipeline,
     DepthProcessorPipeline,
     FastVideoPipeline,
+    GpuInfo,
     ImageGenerationPipeline,
     GpuCleaner,
     IcLoraPipeline,
@@ -21,6 +22,7 @@ from services.interfaces import (
     VideoPipelineModelType,
 )
 from services.services_utils import device_supports_fp8, get_device_type
+from services.vram_manager.vram_manager import VRAMManager
 from state.app_state_types import (
     A2VPipelineState,
     AppState,
@@ -38,6 +40,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# VRAM threshold (GB) above which we use the original full-GPU pipeline.
+_HIGH_VRAM_THRESHOLD = 31
+
 
 class PipelinesHandler(StateHandlerBase):
     def __init__(
@@ -54,6 +59,7 @@ class PipelinesHandler(StateHandlerBase):
         a2v_pipeline_class: type[A2VPipeline],
         retake_pipeline_class: type[RetakePipeline],
         config: RuntimeConfig,
+        gpu_info: GpuInfo | None = None,
     ) -> None:
         super().__init__(state, lock, config)
         self._text_handler = text_handler
@@ -65,6 +71,7 @@ class PipelinesHandler(StateHandlerBase):
         self._pose_processor_pipeline_class = pose_processor_pipeline_class
         self._a2v_pipeline_class = a2v_pipeline_class
         self._retake_pipeline_class = retake_pipeline_class
+        self._gpu_info = gpu_info
         self._runtime_device = get_device_type(self.config.device)
 
     def _ensure_no_running_generation(self) -> None:
@@ -116,7 +123,25 @@ class PipelinesHandler(StateHandlerBase):
             logger.warning("Failed to compile transformer: %s", exc, exc_info=True)
         return state
 
+    def _get_vram_gb(self) -> int | None:
+        """Query total VRAM via the injected GPU info service."""
+        if self._gpu_info is None:
+            return None
+        try:
+            return self._gpu_info.get_vram_total_gb()
+        except Exception:
+            logger.warning("Could not query VRAM", exc_info=True)
+            return None
+
     def _create_video_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
+        vram_gb = self._get_vram_gb()
+
+        if vram_gb is not None and vram_gb < _HIGH_VRAM_THRESHOLD:
+            return self._create_low_vram_pipeline(model_type, vram_gb)
+        return self._create_standard_pipeline(model_type)
+
+    def _create_standard_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
+        """Original full-GPU pipeline for high-VRAM systems (≥31 GB)."""
         gemma_root = self._text_handler.resolve_gemma_root()
 
         checkpoint_path = str(resolve_model_path(self.models_dir, self.config.model_download_specs,"checkpoint"))
@@ -135,6 +160,49 @@ class PipelinesHandler(StateHandlerBase):
             is_compiled=False,
         )
         return self._compile_if_enabled(state)
+
+    def _create_low_vram_pipeline(self, model_type: VideoPipelineModelType, vram_gb: int) -> VideoPipelineState:
+        """Low-VRAM pipeline with sequential offloading + GGUF + block swap."""
+        from services.fast_video_pipeline.ltx_low_vram_pipeline import LTXLowVRAMPipeline
+        from services.gguf_loader.gguf_loader import GGUFModelLoader
+
+        gemma_root = self._text_handler.resolve_gemma_root()
+        checkpoint_path = str(resolve_model_path(self.models_dir, self.config.model_download_specs, "checkpoint"))
+        upsampler_path = str(resolve_model_path(self.models_dir, self.config.model_download_specs, "upsampler"))
+
+        vram_manager = VRAMManager(self.config.device, vram_gb)
+
+        # Check for GGUF model
+        gguf_loader = GGUFModelLoader(self.models_dir)
+        gguf_path: str | None = None
+        if vram_manager.should_use_gguf():
+            recommended_quant = vram_manager.get_recommended_gguf_quant()
+            gguf_file = gguf_loader.find_gguf_model(recommended_quant)
+            if gguf_file is not None:
+                gguf_path = str(gguf_file)
+                logger.info("Using GGUF model: %s (recommended: %s)", gguf_path, recommended_quant)
+            else:
+                logger.info("No GGUF model found; using standard checkpoint with low-VRAM offloading")
+
+        pipeline = LTXLowVRAMPipeline.create(
+            checkpoint_path,
+            gemma_root,
+            upsampler_path,
+            self.config.device,
+            vram_manager=vram_manager,
+            gguf_path=gguf_path,
+        )
+
+        logger.info(
+            "Created low-VRAM pipeline: tier=%s strategy=%s gguf=%s",
+            vram_manager.tier.value, vram_manager.offload_strategy.value, gguf_path is not None,
+        )
+
+        return VideoPipelineState(
+            pipeline=pipeline,
+            warmth=VideoPipelineWarmth.COLD,
+            is_compiled=False,
+        )
 
     def unload_gpu_pipeline(self) -> None:
         with self._lock:

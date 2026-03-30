@@ -1,7 +1,23 @@
 let cached: { url: string; token: string } | null = null
 
+/**
+ * Detect if running in web mode (no Electron) vs Electron mode.
+ * In web mode, the backend is at the same origin.
+ */
+const isWebMode = typeof window !== 'undefined' && !(window as any).__ELECTRON__
+
 export async function getBackendCredentials(): Promise<{ url: string; token: string }> {
-  if (!cached) cached = await window.electronAPI.getBackend()
+  if (!cached) {
+    if (isWebMode && typeof window !== 'undefined' && window.location) {
+      // Web mode: backend is same origin
+      cached = {
+        url: window.location.origin,
+        token: localStorage.getItem('ltx_auth_token') || '',
+      }
+    } else {
+      cached = await window.electronAPI.getBackend()
+    }
+  }
   return cached
 }
 

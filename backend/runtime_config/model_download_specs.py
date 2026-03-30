@@ -33,6 +33,7 @@ MODEL_FILE_ORDER: tuple[ModelFileType, ...] = (
     "pose_processor",
     "text_encoder",
     "zit",
+    "gguf_checkpoint",
 )
 
 
@@ -99,6 +100,13 @@ DEFAULT_MODEL_DOWNLOAD_SPECS: dict[ModelFileType, ModelFileDownloadSpec] = {
         is_folder=True,
         repo_id="Tongyi-MAI/Z-Image-Turbo",
         description="Z-Image-Turbo model for text-to-image generation",
+    ),
+    "gguf_checkpoint": ModelFileDownloadSpec(
+        relative_path=Path("gguf/LTX-2.3-Q8_0.gguf"),
+        expected_size_bytes=12_000_000_000,
+        is_folder=False,
+        repo_id="unsloth/LTX-2.3-GGUF",
+        description="GGUF quantized transformer (Q8_0, ~12GB, for low-VRAM GPUs)",
     ),
 }
 

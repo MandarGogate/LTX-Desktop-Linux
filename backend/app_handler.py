@@ -99,6 +99,7 @@ class AppHandler:
                 "pose_processor": None,
                 "text_encoder": None,
                 "zit": None,
+                "gguf_checkpoint": None,
             },
             downloading_session=None,
             gpu_slot=None,
@@ -154,6 +155,7 @@ class AppHandler:
             a2v_pipeline_class=a2v_pipeline_class,
             retake_pipeline_class=retake_pipeline_class,
             config=config,
+            gpu_info=gpu_info,
         )
 
         self.generation = GenerationHandler(state=self.state, lock=self._lock, config=config)

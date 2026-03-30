@@ -2,6 +2,7 @@
   "keep_models_loaded": true,
   "use_torch_compile": false,
   "load_on_startup": false,
+  "use_local_text_encoder": true,
   "ltx_api_key": "",
   "fal_api_key": "",
   "fast_model": {

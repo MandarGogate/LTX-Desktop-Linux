@@ -2,7 +2,7 @@
 node_modules/
 .pnp
 .pnp.js
-
+media/
 # Build outputs
 dist/
 dist-electron/

@@ -18,6 +18,7 @@ ModelFileType = Literal[
     "pose_processor",
     "text_encoder",
     "zit",
+    "gguf_checkpoint",
 ]
 
 
