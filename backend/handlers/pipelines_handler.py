@@ -40,8 +40,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# VRAM threshold (GB) above which we use the original full-GPU pipeline.
-_HIGH_VRAM_THRESHOLD = 31
+# VRAM threshold (GB) above which we use the standard DistilledPipeline.
+# The standard pipeline already does sequential offloading via cleanup_memory()
+# between phases (text encode → denoise → decode). With FP8 quantization and
+# the text-encoder monkey-patch (which caches embeddings), it fits in ~20-22 GB.
+_HIGH_VRAM_THRESHOLD = 20
 
 
 class PipelinesHandler(StateHandlerBase):
