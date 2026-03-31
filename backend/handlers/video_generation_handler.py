@@ -26,9 +26,7 @@ from server_utils.media_validation import (
     validate_audio_file,
     validate_image_file,
 )
-from services.interfaces import LTXAPIClient
 from state.app_state_types import AppState
-from state.app_settings import should_video_generate_with_ltx_api
 
 if TYPE_CHECKING:
     from runtime_config.runtime_config import RuntimeConfig
@@ -55,6 +53,13 @@ def _get_allowed_durations(model_id: str, resolution_label: str, fps: int) -> se
     return {6, 8, 10}
 
 
+
+
+def _is_gpu_oom_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "cuda out of memory" in message or "outofmemoryerror" in message
+
+
 class VideoGenerationHandler(StateHandlerBase):
     def __init__(
         self,
@@ -63,28 +68,20 @@ class VideoGenerationHandler(StateHandlerBase):
         generation_handler: GenerationHandler,
         pipelines_handler: PipelinesHandler,
         text_handler: TextHandler,
-        ltx_api_client: LTXAPIClient,
         config: RuntimeConfig,
     ) -> None:
         super().__init__(state, lock, config)
         self._generation = generation_handler
         self._pipelines = pipelines_handler
         self._text = text_handler
-        self._ltx_api_client = ltx_api_client
 
     def generate(self, req: GenerateVideoRequest) -> GenerateVideoResponse:
-        if should_video_generate_with_ltx_api(
-            force_api_generations=self.config.force_api_generations,
-            settings=self.state.app_settings,
-        ):
-            return self._generate_forced_api(req)
-
         if self._generation.is_generation_running():
             raise HTTPError(409, "Generation already in progress")
 
         resolution = req.resolution
 
-        duration = int(float(req.duration))
+        duration = float(req.duration)
         fps = int(float(req.fps))
 
         audio_path = normalize_optional_path(req.audioPath)
@@ -92,6 +89,18 @@ class VideoGenerationHandler(StateHandlerBase):
             return self._generate_a2v(req, duration, fps, audio_path=audio_path)
 
         logger.info("Resolution %s - using fast pipeline", resolution)
+
+        # Map frontend model choice to pipeline model type
+        model_choice = req.model.strip().lower()
+        if model_choice in ("distil", "distilled"):
+            pipeline_model_type = "distil"
+        elif model_choice == "quality":
+            pipeline_model_type = "quality"
+        elif model_choice == "custom":
+            pipeline_model_type = "custom"
+        else:
+            # "fast" or "balanced" both use the standard fast pipeline
+            pipeline_model_type = "fast"
 
         RESOLUTION_MAP_16_9: dict[str, tuple[int, int]] = {
             "540p": (960, 544),
@@ -123,8 +132,16 @@ class VideoGenerationHandler(StateHandlerBase):
         generation_id = self._make_generation_id()
         seed = self._resolve_seed()
 
+        # Step count depends on model mode
+        if pipeline_model_type == "quality":
+            total_steps = self.state.app_settings.pro_model.steps
+        elif pipeline_model_type == "custom":
+            total_steps = self.state.app_settings.custom_model.steps
+        else:
+            total_steps = 8
+
         try:
-            self._pipelines.load_gpu_pipeline("fast", should_warm=False)
+            self._pipelines.load_gpu_pipeline(pipeline_model_type, should_warm=False)
             self._generation.start_generation(generation_id)
 
             output_path = self.generate_video(
@@ -137,6 +154,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 seed=seed,
                 camera_motion=req.cameraMotion,
                 negative_prompt=req.negativePrompt,
+                pipeline_model_type=pipeline_model_type,
             )
 
             self._generation.complete_generation(output_path)
@@ -144,6 +162,9 @@ class VideoGenerationHandler(StateHandlerBase):
 
         except Exception as e:
             self._generation.fail_generation(str(e))
+            if _is_gpu_oom_error(e):
+                logger.warning("OOM detected during generation, unloading GPU state for recovery")
+                self._pipelines.recover_after_oom()
             if "cancelled" in str(e).lower():
                 logger.info("Generation cancelled by user")
                 return GenerateVideoResponse(status="cancelled")
@@ -161,22 +182,26 @@ class VideoGenerationHandler(StateHandlerBase):
         seed: int,
         camera_motion: VideoCameraMotion,
         negative_prompt: str,
+        pipeline_model_type: str = "fast",
     ) -> str:
         t_total_start = time.perf_counter()
         gen_mode = "i2v" if image is not None else "t2v"
-        logger.info("[%s] Generation started (model=fast, %dx%d, %d frames, %d fps)", gen_mode, width, height, num_frames, int(fps))
+        logger.info("[%s] Generation started (model=%s, %dx%d, %d frames, %d fps)", gen_mode, pipeline_model_type, width, height, num_frames, int(fps))
 
         if self._generation.is_generation_cancelled():
             raise RuntimeError("Generation was cancelled")
 
-        if not resolve_model_path(self.models_dir, self.config.model_download_specs,"checkpoint").exists():
+        selected_model_path = self.state.app_settings.preferred_model_path.strip()
+        checkpoint_exists = resolve_model_path(self.models_dir, self.config.model_download_specs,"checkpoint").exists()
+        model_available = checkpoint_exists or (bool(selected_model_path) and Path(selected_model_path).exists())
+        if not model_available:
             raise RuntimeError("Models not downloaded. Please download the AI models first using the Model Status menu.")
 
         total_steps = 8
 
         self._generation.update_progress("loading_model", 5, 0, total_steps)
         t_load_start = time.perf_counter()
-        pipeline_state = self._pipelines.load_gpu_pipeline("fast", should_warm=False)
+        pipeline_state = self._pipelines.load_gpu_pipeline(pipeline_model_type, should_warm=False)
         t_load_end = time.perf_counter()
         logger.info("[%s] Pipeline load: %.2fs", gen_mode, t_load_end - t_load_start)
 
@@ -194,23 +219,20 @@ class VideoGenerationHandler(StateHandlerBase):
         output_path = self._make_output_path()
 
         try:
-            settings = self.state.app_settings
-            use_api_encoding = not self._text.should_use_local_encoding()
-            if image is not None:
-                enhance = use_api_encoding and settings.prompt_enhancer_enabled_i2v
-            else:
-                enhance = use_api_encoding and settings.prompt_enhancer_enabled_t2v
-
-            encoding_method = "api" if use_api_encoding else "local"
             t_text_start = time.perf_counter()
-            self._text.prepare_text_encoding(enhanced_prompt, enhance_prompt=enhance)
+            self._text.prepare_text_encoding(enhanced_prompt, enhance_prompt=False)
             t_text_end = time.perf_counter()
-            logger.info("[%s] Text encoding (%s): %.2fs", gen_mode, encoding_method, t_text_end - t_text_start)
+            logger.info("[%s] Text encoding (local): %.2fs", gen_mode, t_text_end - t_text_start)
 
             self._generation.update_progress("inference", 15, 0, total_steps)
 
             height = round(height / 64) * 64
             width = round(width / 64) * 64
+
+            def on_step(current_step: int, step_total: int) -> None:
+                # Map steps to 15%-90% progress range
+                pct = 15 + int((current_step / max(step_total, 1)) * 75)
+                self._generation.update_progress("inference", pct, current_step, step_total)
 
             t_inference_start = time.perf_counter()
             pipeline_state.pipeline.generate(
@@ -222,6 +244,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 frame_rate=fps,
                 images=images,
                 output_path=str(output_path),
+                progress_callback=on_step,
             )
             t_inference_end = time.perf_counter()
             logger.info("[%s] Inference: %.2fs", gen_mode, t_inference_end - t_inference_start)
@@ -244,7 +267,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 os.unlink(temp_image_path)
 
     def _generate_a2v(
-        self, req: GenerateVideoRequest, duration: int, fps: int, *, audio_path: str
+        self, req: GenerateVideoRequest, duration: float, fps: int, *, audio_path: str
     ) -> GenerateVideoResponse:
         if req.model != "pro":
             logger.warning("A2V local requested with model=%s; A2V always uses pro pipeline", req.model)
@@ -287,16 +310,9 @@ class VideoGenerationHandler(StateHandlerBase):
 
             total_steps = 11  # distilled: 8 steps (stage 1) + 3 steps (stage 2)
 
-            a2v_settings = self.state.app_settings
-            a2v_use_api = not self._text.should_use_local_encoding()
-            if image is not None:
-                a2v_enhance = a2v_use_api and a2v_settings.prompt_enhancer_enabled_i2v
-            else:
-                a2v_enhance = a2v_use_api and a2v_settings.prompt_enhancer_enabled_t2v
-
             self._generation.update_progress("loading_model", 5, 0, total_steps)
             self._generation.update_progress("encoding_text", 10, 0, total_steps)
-            self._text.prepare_text_encoding(enhanced_prompt, enhance_prompt=a2v_enhance)
+            self._text.prepare_text_encoding(enhanced_prompt, enhance_prompt=False)
             self._generation.update_progress("inference", 15, 0, total_steps)
 
             a2v_state.pipeline.generate(
@@ -326,6 +342,9 @@ class VideoGenerationHandler(StateHandlerBase):
 
         except Exception as e:
             self._generation.fail_generation(str(e))
+            if _is_gpu_oom_error(e):
+                logger.warning("OOM detected during A2V generation, unloading GPU state for recovery")
+                self._pipelines.recover_after_oom()
             if "cancelled" in str(e).lower():
                 logger.info("Generation cancelled by user")
                 return GenerateVideoResponse(status="cancelled")
@@ -360,8 +379,9 @@ class VideoGenerationHandler(StateHandlerBase):
         return uuid.uuid4().hex[:8]
 
     @staticmethod
-    def _compute_num_frames(duration: int, fps: int) -> int:
-        n = ((duration * fps) // 8) * 8 + 1
+    def _compute_num_frames(duration: float, fps: int) -> int:
+        total_frames = max(1, int(round(duration * fps)))
+        n = ((total_frames - 1) // 8) * 8 + 1
         return max(n, 9)
 
     def _resolve_seed(self) -> int:

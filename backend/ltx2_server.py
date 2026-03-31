@@ -1,4 +1,5 @@
 """FastAPI composition root for the LTX backend server."""
+
 import os
 import sys
 from typing import Any, cast
@@ -20,6 +21,7 @@ if os.environ.get("BACKEND_DEBUG") == "1":
 import logging
 from pathlib import Path
 import threading
+import ast
 
 # Note: expandable_segments is not supported on all platforms
 
@@ -41,6 +43,43 @@ console_handler.setLevel(logging.INFO)
 
 logging.basicConfig(level=logging.INFO, handlers=[console_handler])
 logger = logging.getLogger(__name__)
+
+
+class _ExpectedUninitializedWeightsFilter(logging.Filter):
+    """Suppress only known-harmless missing-weight warnings.
+
+    Some text-only Gemma variants intentionally omit multimodal `vision_tower`
+    weights. Those should not spam the logs, but transformer-wide missing
+    weights must remain visible because they indicate a bad checkpoint/model
+    pairing.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "ltx_core.loader.single_gpu_model_builder":
+            return True
+
+        message = record.getMessage()
+        prefix = "Uninitialized parameters or buffers: "
+        if not message.startswith(prefix):
+            return True
+
+        try:
+            missing = ast.literal_eval(message[len(prefix):])
+        except Exception:
+            return True
+
+        if not isinstance(missing, list) or not missing:
+            return True
+
+        return not all(
+            isinstance(name, str) and ("vision_tower" in name or name.startswith("vision_model."))
+            for name in missing
+        )
+
+
+logging.getLogger("ltx_core.loader.single_gpu_model_builder").addFilter(
+    _ExpectedUninitializedWeightsFilter()
+)
 
 # ============================================================
 # SageAttention Integration
@@ -69,22 +108,53 @@ if use_sage_attention:
         ) -> torch.Tensor:
             global _sageattention_runtime_fallback_logged
             try:
+                use_sdpa = False
                 if (
-                    query.dim() == 4
-                    and attn_mask is None
-                    and dropout_p == 0.0
-                    and query.shape[-1] in _SAGE_SUPPORTED_HEADDIMS
+                    query.dim() != 4
+                    or attn_mask is not None
+                    or dropout_p != 0.0
+                    or query.shape[-1] not in _SAGE_SUPPORTED_HEADDIMS
+                    or not (query.is_cuda and key.is_cuda and value.is_cuda)
+                    or query.dtype != key.dtype
+                    or key.dtype != value.dtype
                 ):
-                    return cast(torch.Tensor, sageattn(query, key, value, is_causal=is_causal, tensor_layout="HND"))  # type: ignore[reportUnnecessaryCast]
-                else:
-                    return _original_sdpa(query, key, value, attn_mask=attn_mask,
-                                         dropout_p=dropout_p, is_causal=is_causal, scale=scale, **kwargs)
+                    use_sdpa = True
+
+                if not use_sdpa:
+                    return cast(
+                        torch.Tensor,
+                        sageattn(
+                            query, key, value, is_causal=is_causal, tensor_layout="HND"
+                        ),
+                    )  # type: ignore[reportUnnecessaryCast]
+
+                return _original_sdpa(
+                    query,
+                    key,
+                    value,
+                    attn_mask=attn_mask,
+                    dropout_p=dropout_p,
+                    is_causal=is_causal,
+                    scale=scale,
+                    **kwargs,
+                )
             except Exception:
                 if not _sageattention_runtime_fallback_logged:
-                    logger.warning("SageAttention failed during runtime; falling back to default attention", exc_info=True)
+                    logger.warning(
+                        "SageAttention failed during runtime; falling back to default attention",
+                        exc_info=True,
+                    )
                     _sageattention_runtime_fallback_logged = True
-                return _original_sdpa(query, key, value, attn_mask=attn_mask,
-                                     dropout_p=dropout_p, is_causal=is_causal, scale=scale, **kwargs)
+                return _original_sdpa(
+                    query,
+                    key,
+                    value,
+                    attn_mask=attn_mask,
+                    dropout_p=dropout_p,
+                    is_causal=is_causal,
+                    scale=scale,
+                    **kwargs,
+                )
 
         F.scaled_dot_product_attention = patched_sdpa
         logger.info("SageAttention enabled - attention operations will be faster")
@@ -99,7 +169,7 @@ if use_sage_attention:
 # Constants & Paths
 # ============================================================
 
-PORT = 0
+PORT = int(os.environ.get("LTX_PORT", "8000"))
 
 
 def _get_device() -> torch.device:
@@ -112,6 +182,7 @@ def _get_device() -> torch.device:
 
 DEVICE = _get_device()
 DTYPE = torch.bfloat16
+
 
 def _resolve_app_data_dir() -> Path:
     env_path = os.environ.get("LTX_APP_DATA_DIR")
@@ -134,6 +205,177 @@ PROJECT_ROOT = Path(__file__).parent.parent
 OUTPUTS_DIR = APP_DATA_DIR / "outputs"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# ============================================================
+# Models directory layout migration
+# ============================================================
+
+def _migrate_models_layout(models_dir: Path) -> None:
+    """Migrate flat models directory to organized subdirectory layout.
+
+    Moves files into: diffusion_models/, text_encoders/, loras/, upscale_models/
+    Runs once; subsequent calls are no-ops because source files no longer exist.
+    """
+    import shutil
+
+    migrations: list[tuple[Path, Path]] = [
+        # Diffusion checkpoints (safetensors) from root → diffusion_models/
+        (models_dir / "ltx-2.3-22b-distilled.safetensors",
+         models_dir / "diffusion_models" / "ltx-2.3-22b-distilled.safetensors"),
+        # Upscaler from root → upscale_models/
+        (models_dir / "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+         models_dir / "upscale_models" / "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"),
+        # IC-LoRA from root → loras/
+        (models_dir / "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+         models_dir / "loras" / "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"),
+        # Default text encoder folder from root → text_encoders/
+        (models_dir / "gemma-3-12b-it-qat-q4_0-unquantized",
+         models_dir / "text_encoders" / "gemma-3-12b-it-qat-q4_0-unquantized"),
+    ]
+
+    # Migrate GGUF files from gguf/ → diffusion_models/
+    legacy_gguf_dir = models_dir / "gguf"
+    if legacy_gguf_dir.exists():
+        for gguf_file in legacy_gguf_dir.rglob("*.gguf"):
+            # Flatten nested dirs (e.g. gguf/distilled/file.gguf → diffusion_models/file.gguf)
+            dest = models_dir / "diffusion_models" / gguf_file.name
+            if not dest.exists():
+                migrations.append((gguf_file, dest))
+
+    moved_count = 0
+    for src, dst in migrations:
+        if not src.exists():
+            continue
+        if dst.exists():
+            logger.info("Migration skip (target exists): %s → %s", src, dst)
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if src.is_dir():
+                shutil.move(str(src), str(dst))
+            else:
+                src.rename(dst)
+            moved_count += 1
+            logger.info("Migrated model: %s → %s", src, dst)
+        except Exception:
+            logger.warning("Failed to migrate %s → %s", src, dst, exc_info=True)
+
+    # Clean up empty legacy gguf/ dir
+    if legacy_gguf_dir.exists():
+        try:
+            _remove_empty_dirs(legacy_gguf_dir)
+        except Exception:
+            pass
+
+    if moved_count > 0:
+        logger.info("Models layout migration complete: moved %d item(s)", moved_count)
+
+    # Migrate saved settings paths that reference old locations
+    _migrate_settings_paths(models_dir)
+
+
+def _migrate_settings_paths(models_dir: Path) -> None:
+    """Rewrite saved settings that reference old model paths."""
+    import json
+
+    settings_file = models_dir.parent / "settings.json"
+    if not settings_file.exists():
+        return
+
+    try:
+        data = json.loads(settings_file.read_text())
+    except Exception:
+        return
+
+    changed = False
+    models_str = str(models_dir)
+
+    # Rewrite preferred_model_path: gguf/... → diffusion_models/..., root .safetensors → diffusion_models/
+    for key in ("preferred_model_path", "preferredModelPath"):
+        val = data.get(key, "")
+        if not val:
+            continue
+        p = Path(val)
+        # Absolute path under models_dir
+        if str(p).startswith(models_str):
+            rel = p.relative_to(models_dir)
+            parts = rel.parts
+            if parts and parts[0] == "gguf" and p.suffix == ".gguf":
+                new_path = models_dir / "diffusion_models" / p.name
+                if new_path.exists():
+                    data[key] = str(new_path)
+                    changed = True
+            elif p.suffix == ".safetensors" and parts and parts[0] not in (
+                "diffusion_models", "loras", "upscale_models", "text_encoders",
+            ):
+                # Root-level checkpoint moved to diffusion_models/
+                new_path = models_dir / "diffusion_models" / p.name
+                if new_path.exists():
+                    data[key] = str(new_path)
+                    changed = True
+
+    # Rewrite preferred_text_encoder_path (relative to models_dir)
+    for key in ("preferred_text_encoder_path", "preferredTextEncoderPath"):
+        val = data.get(key, "")
+        if not val:
+            continue
+        # Already under text_encoders/? Skip.
+        if val.startswith("text_encoders/"):
+            continue
+        # Bare filename → prefix with text_encoders/
+        if "/" not in val:
+            new_val = f"text_encoders/{val}"
+            if (models_dir / new_val).exists():
+                data[key] = new_val
+                changed = True
+
+    # Rewrite preferred_zit_model_path: gguf/... → diffusion_models/...
+    for key in ("preferred_zit_model_path", "preferredZitModelPath"):
+        val = data.get(key, "")
+        if not val:
+            continue
+        if val.startswith("diffusion_models/"):
+            continue
+        # Relative path starting with gguf/
+        if val.startswith("gguf/"):
+            filename = Path(val).name
+            new_val = f"diffusion_models/{filename}"
+            if (models_dir / new_val).exists():
+                data[key] = new_val
+                changed = True
+
+    if changed:
+        try:
+            settings_file.write_text(json.dumps(data, indent=4))
+            logger.info("Migrated settings paths to new models layout")
+        except Exception:
+            logger.warning("Failed to migrate settings paths", exc_info=True)
+
+
+def _remove_empty_dirs(path: Path) -> None:
+    """Recursively remove empty directories."""
+    if not path.is_dir():
+        return
+    for child in list(path.iterdir()):
+        if child.is_dir():
+            _remove_empty_dirs(child)
+    # Remove if now empty (ignoring .cache dirs)
+    remaining = [p for p in path.iterdir() if p.name != ".cache"]
+    if not remaining:
+        # Remove .cache too if present
+        cache = path / ".cache"
+        if cache.exists():
+            import shutil
+            shutil.rmtree(cache, ignore_errors=True)
+        if not any(path.iterdir()):
+            path.rmdir()
+
+
+_migrate_models_layout(DEFAULT_MODELS_DIR)
+
+# Create the new subdirectories
+for _subdir in ("diffusion_models", "text_encoders", "loras", "upscale_models"):
+    (DEFAULT_MODELS_DIR / _subdir).mkdir(exist_ok=True)
+
 logger.info(f"Models directory: {DEFAULT_MODELS_DIR}")
 
 # ============================================================
@@ -148,8 +390,10 @@ DEFAULT_APP_SETTINGS = AppSettings()
 
 from app_factory import DEFAULT_ALLOWED_ORIGINS, create_app
 from state import RuntimeConfig, build_initial_state
-from runtime_config.model_download_specs import DEFAULT_MODEL_DOWNLOAD_SPECS, DEFAULT_REQUIRED_MODEL_TYPES
-from runtime_config.runtime_policy import decide_force_api_generations
+from runtime_config.model_download_specs import (
+    DEFAULT_MODEL_DOWNLOAD_SPECS,
+    DEFAULT_REQUIRED_MODEL_TYPES,
+)
 from state.app_state_types import ModelFileType
 from server_utils.model_layout_migration import migrate_legacy_models_layout
 from services.gpu_info.gpu_info_impl import GpuInfoImpl
@@ -165,12 +409,8 @@ def _resolve_force_api_generations() -> bool:
     cuda_available = gpu_info.get_cuda_available()
     vram_gb = gpu_info.get_vram_total_gb()
 
-    # Server-owned source of truth for mode selection.
-    force_api_generations = decide_force_api_generations(
-        system=system,
-        cuda_available=cuda_available,
-        vram_gb=vram_gb,
-    )
+    # Local-processing-only mode: never force cloud/API generation paths.
+    force_api_generations = False
     logger.info(
         "Runtime policy force_api_generations=%s (system=%s cuda_available=%s vram_gb=%s)",
         force_api_generations,
@@ -219,7 +459,12 @@ handler = build_initial_state(runtime_config, DEFAULT_APP_SETTINGS)
 auth_token = os.environ.get("LTX_AUTH_TOKEN", "")
 admin_token = os.environ.get("LTX_ADMIN_TOKEN", "")
 
-app = create_app(handler=handler, allowed_origins=DEFAULT_ALLOWED_ORIGINS, auth_token=auth_token, admin_token=admin_token)
+app = create_app(
+    handler=handler,
+    allowed_origins=DEFAULT_ALLOWED_ORIGINS,
+    auth_token=auth_token,
+    admin_token=admin_token,
+)
 
 
 def precache_model_files(model_dir: Path) -> int:
@@ -227,7 +472,14 @@ def precache_model_files(model_dir: Path) -> int:
         return 0
     total_bytes = 0
     for f in model_dir.rglob("*"):
-        if f.is_file() and f.suffix in (".safetensors", ".bin", ".pt", ".pth", ".onnx", ".model"):
+        if f.is_file() and f.suffix in (
+            ".safetensors",
+            ".bin",
+            ".pt",
+            ".pth",
+            ".onnx",
+            ".model",
+        ):
             try:
                 size = f.stat().st_size
                 with open(f, "rb") as fh:
@@ -282,29 +534,49 @@ if __name__ == "__main__":
         },
         "loggers": {
             "uvicorn": {"handlers": ["default"], "level": "INFO"},
-            "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
-            "uvicorn.access": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {
+                "handlers": ["default"],
+                "level": "INFO",
+                "propagate": False,
+            },
+            "uvicorn.access": {
+                "handlers": ["default"],
+                "level": "INFO",
+                "propagate": False,
+            },
         },
     }
 
     import socket as _socket
 
-    # Bind the socket ourselves so we know the actual port before uvicorn starts.
+    import os
+
+    host = os.environ.get("BACKEND_HOST", "127.0.0.1")
+
     sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
     sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", port))
+    sock.bind((host, port))
     actual_port = int(sock.getsockname()[1])
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=actual_port, log_level="info", access_log=False, log_config=log_config)
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=actual_port,
+        log_level="info",
+        access_log=False,
+        log_config=log_config,
+    )
     server = uvicorn.Server(config)
 
     _orig_startup = server.startup
 
-    async def _startup_with_ready_msg(sockets: list[_socket.socket] | None = None) -> None:
+    async def _startup_with_ready_msg(
+        sockets: list[_socket.socket] | None = None,
+    ) -> None:
         await _orig_startup(sockets=sockets)
         if server.started:
             # Machine-parseable ready message — Electron matches this line
-            print(f"Server running on http://127.0.0.1:{actual_port}", flush=True)
+            print(f"Server running on http://{host}:{actual_port}", flush=True)
 
     server.startup = _startup_with_ready_msg  # type: ignore[assignment]
 

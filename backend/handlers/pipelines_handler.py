@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
 
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 # The standard pipeline already does sequential offloading via cleanup_memory()
 # between phases (text encode → denoise → decode). With FP8 quantization and
 # the text-encoder monkey-patch (which caches embeddings), it fits in ~20-22 GB.
-_HIGH_VRAM_THRESHOLD = 20
+_HIGH_VRAM_THRESHOLD = 48  # Only GPUs with ≥48GB can hold all models simultaneously
 
 
 class PipelinesHandler(StateHandlerBase):
@@ -87,7 +88,7 @@ class PipelinesHandler(StateHandlerBase):
     def _pipeline_matches_model_type(self, model_type: VideoPipelineModelType) -> bool:
         match self.state.gpu_slot:
             case GpuSlot(active_pipeline=VideoPipelineState(pipeline=pipeline)):
-                return pipeline.pipeline_kind == model_type
+                return getattr(pipeline, '_model_mode', None) == model_type
             case _:
                 return False
 
@@ -138,24 +139,162 @@ class PipelinesHandler(StateHandlerBase):
 
     def _create_video_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
         vram_gb = self._get_vram_gb()
+        preferred_checkpoint_path, preferred_gguf_path = self._resolve_preferred_model_paths()
 
-        if vram_gb is not None and vram_gb < _HIGH_VRAM_THRESHOLD:
-            return self._create_low_vram_pipeline(model_type, vram_gb)
-        return self._create_standard_pipeline(model_type)
+        if model_type == "custom":
+            return self._create_low_vram_pipeline(
+                model_type,
+                vram_gb or 0,
+                preferred_checkpoint_path=preferred_checkpoint_path,
+                preferred_gguf_path=preferred_gguf_path,
+                force_gguf=False,
+                skip_loras=False,
+            )
 
-    def _create_standard_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
+        # For "distil" mode: prefer a distilled GGUF, no LoRAs
+        # For "quality" mode: no LoRAs, use dev checkpoint / GGUF with custom steps
+        # For "fast" mode: dev checkpoint/GGUF + distilled LoRA (8 steps)
+        force_gguf = model_type == "distil"
+        skip_loras = model_type in ("distil", "quality")
+
+        gguf_path_for_mode = preferred_gguf_path
+        if model_type == 'distil':
+            # Prefer smaller distilled quants for speed/stability in local mode.
+            # If the user selected a GGUF, we still try to match that quant first.
+            quant = 'Q4_K_M'
+            gguf_path_for_mode = self._resolve_distilled_gguf_path(preferred_gguf_path, quant)
+            if gguf_path_for_mode is None:
+                logger.warning('Distil mode selected but no distilled GGUF found; will fall back to checkpoint path if available')
+
+        use_low_vram = (
+            gguf_path_for_mode is not None
+            or (vram_gb is not None and vram_gb < _HIGH_VRAM_THRESHOLD)
+        )
+
+        if use_low_vram:
+            return self._create_low_vram_pipeline(
+                model_type,
+                vram_gb or 0,
+                preferred_checkpoint_path=preferred_checkpoint_path,
+                preferred_gguf_path=gguf_path_for_mode,
+                force_gguf=force_gguf,
+                skip_loras=skip_loras,
+            )
+        return self._create_standard_pipeline(
+            model_type,
+            preferred_checkpoint_path=preferred_checkpoint_path,
+            skip_loras=skip_loras,
+        )
+
+    def _resolve_selected_loras(self) -> list[tuple[str, float]]:
+        out: list[tuple[str, float]] = []
+        for item in self.state.app_settings.selected_loras:
+            path = item.path.strip()
+            if path and Path(path).exists():
+                out.append((path, item.strength))
+
+        # Backward-compatibility for older settings.
+        if not out:
+            preferred_path = self.state.app_settings.preferred_lora_path.strip()
+            if preferred_path and Path(preferred_path).exists():
+                out.append((preferred_path, self.state.app_settings.preferred_lora_strength))
+        return out
+
+    def _resolve_default_distilled_lora(self) -> tuple[str, float] | None:
+        candidates = [
+            self.models_dir / "loras" / "ltx-2.3-22b-distilled-lora-384.safetensors",
+            self.models_dir / "ltx-2.3-22b-distilled-lora-384.safetensors",
+            self.models_dir / "ltx-2-19b-distilled-lora-384.safetensors",
+        ]
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return str(candidate), 0.6
+
+        lora_dir = self.models_dir / "loras"
+        if lora_dir.exists():
+            for candidate in sorted(lora_dir.glob("*distilled*lora*.safetensors")):
+                if candidate.is_file():
+                    return str(candidate), 0.6
+        return None
+
+    def _resolve_preferred_model_paths(self) -> tuple[str | None, str | None]:
+        preferred_path = self.state.app_settings.preferred_model_path.strip()
+        if preferred_path and Path(preferred_path).exists():
+            if preferred_path.lower().endswith('.gguf'):
+                return None, preferred_path
+            return preferred_path, None
+
+        preferred_gguf_path = self.state.app_settings.preferred_gguf_path.strip()
+        if preferred_gguf_path and Path(preferred_gguf_path).exists():
+            return None, preferred_gguf_path
+        return None, None
+
+    def _resolve_distilled_gguf_path(self, preferred_gguf_path: str | None, preferred_quant: str) -> str | None:
+        """Find a distilled GGUF, preferably matching the selected quant level."""
+        search_dirs = [self.models_dir / 'diffusion_models', self.models_dir / 'gguf', self.models_dir]
+
+        # If user picked a dev GGUF, try the distilled sibling with same quant.
+        if preferred_gguf_path is not None:
+            selected = Path(preferred_gguf_path)
+            name = selected.name
+            for quant in ['Q8_0', 'Q6_K', 'Q5_1', 'Q5_0', 'Q4_K_M', 'Q4_K_S', 'Q4_1', 'Q4_0', 'Q3_K_M', 'Q2_K']:
+                if quant in name:
+                    preferred_quant = quant
+                    break
+
+        # Prefer exact distilled quant match.
+        for search_dir in search_dirs:
+            if not search_dir.exists():
+                continue
+            for gguf_file in search_dir.rglob(f'*distilled*{preferred_quant}*.gguf'):
+                return str(gguf_file)
+
+        # Fallback: any distilled GGUF.
+        for search_dir in search_dirs:
+            if not search_dir.exists():
+                continue
+            for gguf_file in search_dir.rglob('*distilled*.gguf'):
+                return str(gguf_file)
+
+        return None
+
+    def _create_standard_pipeline(
+        self,
+        model_type: VideoPipelineModelType,
+        *,
+        preferred_checkpoint_path: str | None = None,
+        skip_loras: bool = False,
+    ) -> VideoPipelineState:
         """Original full-GPU pipeline for high-VRAM systems (≥31 GB)."""
         gemma_root = self._text_handler.resolve_gemma_root()
 
-        checkpoint_path = str(resolve_model_path(self.models_dir, self.config.model_download_specs,"checkpoint"))
+        checkpoint_path = preferred_checkpoint_path or str(resolve_model_path(self.models_dir, self.config.model_download_specs,"checkpoint"))
         upsampler_path = str(resolve_model_path(self.models_dir, self.config.model_download_specs,"upsampler"))
+
+        primary_lora_path: str | None = None
+        primary_lora_strength = 1.0
+        extra_loras: list[tuple[str, float]] | None = None
+
+        if not skip_loras:
+            selected_loras = self._resolve_selected_loras()
+            if not selected_loras and model_type == "fast":
+                default_lora = self._resolve_default_distilled_lora()
+                if default_lora is not None:
+                    selected_loras = [default_lora]
+            primary_lora_path = selected_loras[0][0] if selected_loras else None
+            primary_lora_strength = selected_loras[0][1] if selected_loras else 1.0
+            extra_loras = selected_loras[1:] if len(selected_loras) > 1 else None
 
         pipeline = self._fast_video_pipeline_class.create(
             checkpoint_path,
             gemma_root,
             upsampler_path,
             self.config.device,
+            lora_path=primary_lora_path,
+            lora_strength=primary_lora_strength,
+            extra_loras=extra_loras,
         )
+        pipeline._model_mode = model_type  # type: ignore[attr-defined]
 
         state = VideoPipelineState(
             pipeline=pipeline,
@@ -164,28 +303,78 @@ class PipelinesHandler(StateHandlerBase):
         )
         return self._compile_if_enabled(state)
 
-    def _create_low_vram_pipeline(self, model_type: VideoPipelineModelType, vram_gb: int) -> VideoPipelineState:
+    def _create_low_vram_pipeline(
+        self,
+        model_type: VideoPipelineModelType,
+        vram_gb: int,
+        *,
+        preferred_checkpoint_path: str | None = None,
+        preferred_gguf_path: str | None = None,
+        force_gguf: bool = False,
+        skip_loras: bool = False,
+    ) -> VideoPipelineState:
         """Low-VRAM pipeline with sequential offloading + GGUF + block swap."""
         from services.fast_video_pipeline.ltx_low_vram_pipeline import LTXLowVRAMPipeline
         from services.gguf_loader.gguf_loader import GGUFModelLoader
 
         gemma_root = self._text_handler.resolve_gemma_root()
-        checkpoint_path = str(resolve_model_path(self.models_dir, self.config.model_download_specs, "checkpoint"))
+        checkpoint_path = preferred_checkpoint_path or str(resolve_model_path(self.models_dir, self.config.model_download_specs, "checkpoint"))
         upsampler_path = str(resolve_model_path(self.models_dir, self.config.model_download_specs, "upsampler"))
 
-        vram_manager = VRAMManager(self.config.device, vram_gb)
+        vram_manager = VRAMManager(
+            self.config.device,
+            vram_gb,
+            user_blocks_on_gpu=self.state.app_settings.num_blocks_to_swap,
+            user_run_mode=self.state.app_settings.run_mode,
+        )
 
         # Check for GGUF model
         gguf_loader = GGUFModelLoader(self.models_dir)
-        gguf_path: str | None = None
-        if vram_manager.should_use_gguf():
+        gguf_path: str | None = preferred_gguf_path
+        should_auto_use_gguf = (
+            model_type != "custom"
+            and preferred_checkpoint_path is None
+            and (force_gguf or vram_manager.should_use_gguf())
+        )
+        if gguf_path is None and should_auto_use_gguf:
             recommended_quant = vram_manager.get_recommended_gguf_quant()
             gguf_file = gguf_loader.find_gguf_model(recommended_quant)
             if gguf_file is not None:
                 gguf_path = str(gguf_file)
                 logger.info("Using GGUF model: %s (recommended: %s)", gguf_path, recommended_quant)
             else:
-                logger.info("No GGUF model found; using standard checkpoint with low-VRAM offloading")
+                if force_gguf:
+                    logger.warning("Distil mode requested but no GGUF model found; falling back to checkpoint")
+                else:
+                    logger.info("No GGUF model found; using standard checkpoint with low-VRAM offloading")
+        elif gguf_path is not None:
+            logger.info("Using user-selected GGUF model: %s", gguf_path)
+
+        primary_lora_path: str | None = None
+        primary_lora_strength = 1.0
+        extra_loras: list[tuple[str, float]] | None = None
+
+        if not skip_loras:
+            selected_loras = self._resolve_selected_loras()
+            if not selected_loras and model_type == "fast":
+                default_lora = self._resolve_default_distilled_lora()
+                if default_lora is not None:
+                    selected_loras = [default_lora]
+            primary_lora_path = selected_loras[0][0] if selected_loras else None
+            primary_lora_strength = selected_loras[0][1] if selected_loras else 1.0
+            extra_loras = selected_loras[1:] if len(selected_loras) > 1 else None
+
+        # For quality mode, pass the custom step count
+        num_inference_steps: int | None = None
+        if model_type == "quality":
+            num_inference_steps = self.state.app_settings.pro_model.steps
+        elif model_type == "custom":
+            num_inference_steps = self.state.app_settings.custom_model.steps
+
+        preferred_text_encoder_path = self.state.app_settings.preferred_text_encoder_path.strip()
+        text_encoder_variant_path = None
+        if preferred_text_encoder_path and (self.models_dir / preferred_text_encoder_path).exists():
+            text_encoder_variant_path = str(self.models_dir / preferred_text_encoder_path)
 
         pipeline = LTXLowVRAMPipeline.create(
             checkpoint_path,
@@ -194,11 +383,19 @@ class PipelinesHandler(StateHandlerBase):
             self.config.device,
             vram_manager=vram_manager,
             gguf_path=gguf_path,
+            lora_path=primary_lora_path,
+            lora_strength=primary_lora_strength,
+            extra_loras=extra_loras,
+            use_sage_attention=self.config.use_sage_attention,
+            num_inference_steps=num_inference_steps,
+            text_encoder_variant_path=text_encoder_variant_path,
         )
+        pipeline._model_mode = model_type  # type: ignore[attr-defined]
 
         logger.info(
-            "Created low-VRAM pipeline: tier=%s strategy=%s gguf=%s",
-            vram_manager.tier.value, vram_manager.offload_strategy.value, gguf_path is not None,
+            "Created low-VRAM pipeline: mode=%s tier=%s strategy=%s gguf=%s loras=%s",
+            model_type, vram_manager.tier.value, vram_manager.offload_strategy.value,
+            gguf_path is not None, not skip_loras,
         )
 
         return VideoPipelineState(
@@ -212,6 +409,29 @@ class PipelinesHandler(StateHandlerBase):
             self._ensure_no_running_generation()
             self.state.gpu_slot = None
             self._assert_invariants()
+        self._gpu_cleaner.cleanup()
+
+    def recover_after_oom(self) -> None:
+        cached_encoder = None
+
+        with self._lock:
+            self.state.gpu_slot = None
+
+            te = self.state.text_encoder
+            if te is not None:
+                te.api_embeddings = None
+                te.prompt_cache.clear()
+                cached_encoder = te.cached_encoder
+                te.cached_encoder = None
+
+            self._assert_invariants()
+
+        if cached_encoder is not None:
+            try:
+                cached_encoder.to("cpu")
+            except Exception:
+                logger.warning("Failed to offload cached text encoder during OOM recovery", exc_info=True)
+
         self._gpu_cleaner.cleanup()
 
     def park_zit_on_cpu(self) -> None:
@@ -240,6 +460,29 @@ class PipelinesHandler(StateHandlerBase):
             self.state.cpu_slot = CpuSlot(active_pipeline=zit)
             self._assert_invariants()
 
+    def _resolve_preferred_zit_path(self) -> str | None:
+        preferred_zit = self.state.app_settings.preferred_zit_model_path.strip()
+        if not preferred_zit:
+            return None
+
+        preferred_path = Path(preferred_zit)
+        resolved = preferred_path if preferred_path.is_absolute() else self.models_dir / preferred_zit
+        if not resolved.exists():
+            return None
+        return str(resolved)
+
+    def _find_zit_gguf(self) -> str | None:
+        """Search for a Z-Image-Turbo GGUF file in diffusion_models/ and legacy gguf/."""
+        for search_dir in (self.models_dir / "diffusion_models", self.models_dir / "gguf", self.models_dir):
+            if not search_dir.exists():
+                continue
+            for f in search_dir.rglob("*.gguf"):
+                name = f.name.lower()
+                if "z-image" in name or "zimage" in name or "z_image" in name:
+                    logger.info("Found ZIT GGUF model: %s", f)
+                    return str(f)
+        return None
+
     def load_zit_to_gpu(self) -> ImageGenerationPipeline:
         with self._lock:
             if self.state.gpu_slot is not None:
@@ -259,10 +502,25 @@ class PipelinesHandler(StateHandlerBase):
                     zit_service = None
 
         if zit_service is None:
-            zit_path = resolve_model_path(self.models_dir, self.config.model_download_specs,"zit")
-            if not (zit_path.exists() and any(zit_path.iterdir())):
-                raise RuntimeError("Z-Image-Turbo model not downloaded. Please download the AI models first using the Model Status menu.")
-            zit_service = self._image_generation_pipeline_class.create(str(zit_path), self._runtime_device)
+            # Check for user-preferred ZIT model path first
+            preferred_zit_path = self._resolve_preferred_zit_path()
+            if preferred_zit_path is not None:
+                zit_path_str = preferred_zit_path
+            else:
+                zit_path = resolve_model_path(self.models_dir, self.config.model_download_specs, "zit")
+                if zit_path.exists() and any(zit_path.iterdir()):
+                    zit_path_str = str(zit_path)
+                else:
+                    # Search for GGUF ZIT files in diffusion_models/
+                    gguf_zit = self._find_zit_gguf()
+                    if gguf_zit is not None:
+                        zit_path_str = gguf_zit
+                    else:
+                        raise RuntimeError(
+                            "Z-Image-Turbo model not found. Download it from Settings → Model Downloads "
+                            "(either the full model folder or a GGUF variant)."
+                        )
+            zit_service = self._image_generation_pipeline_class.create(zit_path_str, self._runtime_device)
         else:
             zit_service.to(self._runtime_device)
 
@@ -282,11 +540,23 @@ class PipelinesHandler(StateHandlerBase):
                 case _:
                     pass
 
-        zit_path = resolve_model_path(self.models_dir, self.config.model_download_specs,"zit")
-        if not (zit_path.exists() and any(zit_path.iterdir())):
-            raise RuntimeError("Z-Image-Turbo model not downloaded. Please download the AI models first using the Model Status menu.")
+        preferred_zit_path = self._resolve_preferred_zit_path()
+        if preferred_zit_path is not None:
+            zit_path_str = preferred_zit_path
+        else:
+            zit_path = resolve_model_path(self.models_dir, self.config.model_download_specs, "zit")
+            if zit_path.exists() and any(zit_path.iterdir()):
+                zit_path_str = str(zit_path)
+            else:
+                gguf_zit = self._find_zit_gguf()
+                if gguf_zit is not None:
+                    zit_path_str = gguf_zit
+                else:
+                    raise RuntimeError(
+                        "Z-Image-Turbo model not found. Download it from Settings → Model Downloads."
+                    )
 
-        zit_service = self._image_generation_pipeline_class.create(str(zit_path), None)
+        zit_service = self._image_generation_pipeline_class.create(zit_path_str, None)
         with self._lock:
             if self.state.cpu_slot is None:
                 self.state.cpu_slot = CpuSlot(active_pipeline=zit_service)
