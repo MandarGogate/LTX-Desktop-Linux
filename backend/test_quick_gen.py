@@ -11,8 +11,20 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("test_quick_gen")
 
-BACKEND_URL = os.environ.get("BACKEND_URL", "http://172.28.0.1:8001")
 MODELS_DIR = os.path.expanduser("~/.ltx-desktop/models")
+
+
+def _resolve_backend_url() -> str:
+    explicit = os.environ.get("BACKEND_URL")
+    if explicit:
+        return explicit.rstrip("/")
+
+    host = os.environ.get("BACKEND_HOST", "127.0.0.1")
+    port = os.environ.get("BACKEND_PORT", "8001")
+    return f"http://{host}:{port}"
+
+
+BACKEND_URL = _resolve_backend_url()
 
 
 def wait_for_backend(timeout: int = 180) -> bool:
