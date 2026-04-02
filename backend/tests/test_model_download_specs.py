@@ -59,13 +59,13 @@ def test_downloading_path_is_derived_from_specs(tmp_path):
     models_dir = config.default_models_dir
     downloading_dir = resolve_downloading_dir(models_dir)
 
-    assert resolve_downloading_path(models_dir, specs, "checkpoint") == downloading_dir
-    assert resolve_downloading_path(models_dir, specs, "ic_lora") == downloading_dir
+    assert resolve_downloading_path(models_dir, specs, "checkpoint") == downloading_dir / "diffusion_models"
+    assert resolve_downloading_path(models_dir, specs, "ic_lora") == downloading_dir / "loras"
     assert resolve_downloading_path(models_dir, specs, "depth_processor") == downloading_dir / "dpt-hybrid-midas"
     assert resolve_downloading_path(models_dir, specs, "person_detector") == downloading_dir
     assert resolve_downloading_path(models_dir, specs, "pose_processor") == downloading_dir
     assert resolve_downloading_path(models_dir, specs, "zit") == downloading_dir / "Z-Image-Turbo"
-    assert resolve_downloading_path(models_dir, specs, "text_encoder") == downloading_dir / "gemma-3-12b-it-qat-q4_0-unquantized"
+    assert resolve_downloading_path(models_dir, specs, "text_encoder") == downloading_dir / "text_encoders" / "gemma-3-12b-it-qat-q4_0-unquantized"
 
 
 def test_downloading_path_supports_nested_relative_parents(tmp_path):

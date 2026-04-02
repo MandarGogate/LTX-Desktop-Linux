@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from 'react'
 import type { GenerationSettings } from '../components/SettingsPanel'
 import { backendFetch } from '../lib/backend'
-import { useAppSettings } from '../contexts/AppSettingsContext'
+import { toServableUrl } from '../lib/serve-url'
 
 interface GenerationState {
   isGenerating: boolean
@@ -90,7 +90,6 @@ function getPhaseMessage(phase: string): string {
 }
 
 export function useGeneration(): UseGenerationReturn {
-  const { settings: appSettings, forceApiGenerations, refreshSettings } = useAppSettings()
   const [state, setState] = useState<GenerationState>({
     isGenerating: false,
     progress: 0,
@@ -152,11 +151,7 @@ export function useGeneration(): UseGenerationReturn {
         body.audioPath = audioPath
       }
 
-      // Poll for real progress from backend with time-based interpolation
-      let lastPhase = ''
-      let inferenceStartTime = 0
-      // Estimated inference time in seconds based on model
-      const estimatedInferenceTime = settings.model === 'pro' ? 120 : 45
+      // Poll for real progress from backend
       
       const pollProgress = async () => {
         if (!shouldApplyPollingUpdates) return
@@ -169,25 +164,22 @@ export function useGeneration(): UseGenerationReturn {
             let displayProgress = data.progress
             let statusMessage = getPhaseMessage(data.phase)
             
-            // Time-based interpolation during inference phase
-            if (data.phase === 'inference') {
-              if (lastPhase !== 'inference') {
-                inferenceStartTime = Date.now()
-              }
-              const elapsed = (Date.now() - inferenceStartTime) / 1000
-              // Interpolate from 15% to 95% based on estimated time
-              const inferenceProgress = Math.min(elapsed / estimatedInferenceTime, 0.95)
-              displayProgress = 15 + Math.floor(inferenceProgress * 80)
+            // Use step-based progress during inference
+            if (data.phase === 'inference' && data.totalSteps && data.totalSteps > 0) {
+              const stepFraction = (data.currentStep ?? 0) / data.totalSteps
+              // Map inference progress to 15%–90% range
+              displayProgress = 15 + Math.floor(stepFraction * 75)
+            } else if (data.phase === 'inference') {
+              // No step info yet, show a gentle progress
+              displayProgress = Math.max(displayProgress, 15)
             }
 
-            // Keep API/local completion as a terminal response state, not polling state.
-            // Polling complete means backend state is finalized, but request can still be in-flight.
+            // Backend sets progress=100 when complete; map to 95 here
+            // so the final 100% only shows after HTTP response arrives
             if (data.phase === 'complete' || data.status === 'complete') {
               displayProgress = 95
               statusMessage = 'Finalizing...'
             }
-            
-            lastPhase = data.phase
             
             setState(prev => ({
               ...prev,
@@ -219,7 +211,7 @@ export function useGeneration(): UseGenerationReturn {
       const result = await response.json()
       
       if (result.status === 'complete' && result.video_path) {
-        // Convert Windows path to proper file:// URL
+        // Convert path to a URL the browser can load
         const videoPathNormalized = result.video_path.replace(/\\/g, '/')
         const fileUrl = videoPathNormalized.startsWith('/') ? `file://${videoPathNormalized}` : `file:///${videoPathNormalized}`
         
@@ -227,8 +219,8 @@ export function useGeneration(): UseGenerationReturn {
           isGenerating: false,
           progress: 100,
           statusMessage: 'Complete!',
-          videoUrl: fileUrl,
-          videoPath: result.video_path,  // Keep original path for API calls
+          videoUrl: toServableUrl(fileUrl),
+          videoPath: result.video_path,
           imageUrl: null,
           imagePath: null,
           imageUrls: [],
@@ -289,39 +281,6 @@ export function useGeneration(): UseGenerationReturn {
     prompt: string,
     settings: GenerationSettings
   ) => {
-    if (forceApiGenerations) {
-      try {
-        const response = await backendFetch('/api/settings')
-        if (response.ok) {
-          const payload = await response.json()
-          if (!payload?.hasFalApiKey) {
-            void refreshSettings()
-            window.dispatchEvent(new CustomEvent('open-api-gateway', {
-              detail: {
-                requiredKeys: ['fal'],
-                title: 'Connect FAL AI',
-                description: 'FAL AI is required for generating images with Z Image Turbo when API generations are enabled.',
-                blocking: false,
-              },
-            }))
-            return
-          }
-        }
-      } catch {
-        if (!appSettings.hasFalApiKey) {
-          window.dispatchEvent(new CustomEvent('open-api-gateway', {
-            detail: {
-              requiredKeys: ['fal'],
-              title: 'Connect FAL AI',
-              description: 'FAL AI is required for generating images with Z Image Turbo when API generations are enabled.',
-              blocking: false,
-            },
-          }))
-          return
-        }
-      }
-    }
-
     const numImages = settings.variations || 1
     
     setState({
@@ -352,17 +311,20 @@ export function useGeneration(): UseGenerationReturn {
           const res = await backendFetch('/api/generation/progress')
           if (res.ok) {
             const data = await res.json()
-            const currentImage = data.currentStep || 0
-            const totalImages = data.totalSteps || numImages
+            const currentStep = data.currentStep || 0
+            const totalSteps = data.totalSteps || numSteps
+            const stepText = data.phase === 'inference' && totalSteps > 0
+              ? ` (${Math.min(currentStep, totalSteps)}/${totalSteps} steps)`
+              : ''
             setState(prev => ({
               ...prev,
               progress: data.progress,
-              statusMessage: data.phase === 'loading_model' 
-                ? 'Loading Z-Image Turbo model...' 
+              statusMessage: data.phase === 'loading_model'
+                ? 'Loading Z-Image Turbo model...'
                 : data.phase === 'inference'
-                  ? numImages > 1 
-                    ? `Generating image ${currentImage + 1}/${totalImages}...`
-                    : 'Generating image...'
+                  ? numImages > 1
+                    ? `Generating images...${stepText}`
+                    : `Generating image...${stepText}`
                   : data.phase === 'complete'
                     ? 'Complete!'
                     : 'Generating...',
@@ -375,20 +337,23 @@ export function useGeneration(): UseGenerationReturn {
       
       const progressInterval = setInterval(pollProgress, 500)
 
-      const response = await backendFetch('/api/generate-image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: finalPrompt,
-          width: dims.width,
-          height: dims.height,
-          numSteps,
-          numImages,
-        }),
-        signal: abortControllerRef.current.signal,
-      })
-
-      clearInterval(progressInterval)
+      let response: Response
+      try {
+        response = await backendFetch('/api/generate-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: finalPrompt,
+            width: dims.width,
+            height: dims.height,
+            numSteps,
+            numImages,
+          }),
+          signal: abortControllerRef.current.signal,
+        })
+      } finally {
+        clearInterval(progressInterval)
+      }
 
       if (!response.ok) {
         const errorText = await response.text()
@@ -407,10 +372,11 @@ export function useGeneration(): UseGenerationReturn {
         }
         
         if (rawPaths.length > 0) {
-          // Convert all paths to file URLs
+          // Convert all paths to servable URLs
           const fileUrls = rawPaths.map((path: string) => {
             const imagePath = path.replace(/\\/g, '/')
-            return imagePath.startsWith('/') ? `file://${imagePath}` : `file:///${imagePath}`
+            const fileUrl = imagePath.startsWith('/') ? `file://${imagePath}` : `file:///${imagePath}`
+            return toServableUrl(fileUrl)
           })
           
           setState({
@@ -419,8 +385,8 @@ export function useGeneration(): UseGenerationReturn {
             statusMessage: 'Complete!',
             videoUrl: null,
             videoPath: null,
-            imageUrl: fileUrls[0],  // First image for backwards compatibility
-            imagePath: rawPaths[0],  // First image path
+            imageUrl: fileUrls[0],
+            imagePath: rawPaths[0],
             imageUrls: fileUrls,    // All images
             imagePaths: rawPaths,   // All image paths
             error: null,
@@ -451,7 +417,7 @@ export function useGeneration(): UseGenerationReturn {
         }))
       }
     }
-  }, [appSettings.hasFalApiKey, forceApiGenerations, refreshSettings])
+  }, [])
 
   const reset = useCallback(() => {
     setState({

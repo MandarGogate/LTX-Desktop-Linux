@@ -171,3 +171,75 @@ class TestNoBlocksFound:
             use_async_prefetch=False,
         )
         assert wrapper.block_count == 0
+
+
+class TestNestedBlocks:
+    """Tests for block discovery in nested model architectures (like LTX X0Model)."""
+
+    def test_finds_blocks_in_velocity_model(self) -> None:
+        """Blocks nested under velocity_model should be discovered."""
+
+        class InnerModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.transformer_blocks = nn.ModuleList(
+                    [SimpleBlock(16) for _ in range(6)]
+                )
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                for block in self.transformer_blocks:
+                    x = block(x)
+                return x
+
+        class X0Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.velocity_model = InnerModel()
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return self.velocity_model(x)
+
+        model = X0Model()
+        wrapper = BlockSwapTransformerWrapper(
+            transformer=model,
+            device=torch.device("cpu"),
+            blocks_to_keep_on_gpu=2,
+            use_async_prefetch=False,
+        )
+        assert wrapper.block_count == 6
+        assert wrapper.gpu_block_count == 2
+
+    def test_forward_pass_with_nested_blocks(self) -> None:
+        """Forward pass should work with nested block architecture."""
+
+        class InnerModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.transformer_blocks = nn.ModuleList(
+                    [SimpleBlock(16) for _ in range(4)]
+                )
+                self.head = nn.Linear(16, 16)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                for block in self.transformer_blocks:
+                    x = block(x)
+                return self.head(x)
+
+        class X0Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.velocity_model = InnerModel()
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return self.velocity_model(x)
+
+        model = X0Model()
+        _wrapper = BlockSwapTransformerWrapper(
+            transformer=model,
+            device=torch.device("cpu"),
+            blocks_to_keep_on_gpu=1,
+            use_async_prefetch=False,
+        )
+        x = torch.randn(1, 16)
+        output = model(x)
+        assert output.shape == (1, 16)

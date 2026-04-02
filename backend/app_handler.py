@@ -166,7 +166,6 @@ class AppHandler:
             generation_handler=self.generation,
             pipelines_handler=self.pipelines,
             text_handler=self.text,
-            ltx_api_client=ltx_api_client,
             config=config,
         )
 

@@ -8,7 +8,7 @@ import {
 } from '../lib/api-video-options'
 
 export interface GenerationSettings {
-  model: 'fast' | 'pro'
+  model: 'fast' | 'balanced' | 'quality' | 'custom' | 'pro'
   duration: number
   videoResolution: string
   fps: number
@@ -40,7 +40,7 @@ export function SettingsPanel({
   hasAudio = false,
 }: SettingsPanelProps) {
   const isImageMode = mode === 'text-to-image'
-  const LOCAL_MAX_DURATION: Record<string, number> = { '540p': 20, '720p': 10, '1080p': 5 }
+  const LOCAL_MAX_DURATION: Record<string, number> = { '540p': 20, '720p': 20, '1080p': 20 }
 
   const handleChange = (key: keyof GenerationSettings, value: string | number | boolean) => {
     const nextSettings = { ...settings, [key]: value } as GenerationSettings
@@ -63,7 +63,7 @@ export function SettingsPanel({
   const localMaxDuration = LOCAL_MAX_DURATION[settings.videoResolution] ?? 20
   const durationOptions = forceApiGenerations
     ? [...getAllowedForcedApiDurations(settings.model, settings.videoResolution, settings.fps)]
-    : [5, 6, 8, 10, 20].filter(d => d <= localMaxDuration)
+    : [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20].filter(d => d <= localMaxDuration)
   const resolutionOptions = forceApiGenerations
     ? (hasAudio ? ['1080p'] : [...FORCED_API_VIDEO_RESOLUTIONS])
     : ['1080p', '720p', '540p']
@@ -111,11 +111,13 @@ export function SettingsPanel({
       {!forceApiGenerations ? (
         <Select
           label="Model"
-          value={settings.model}
+          value={settings.model === 'quality' ? 'balanced' : settings.model}
           onChange={(e) => handleChange('model', e.target.value)}
           disabled={disabled}
         >
           <option value="fast">LTX 2.3 Fast</option>
+          <option value="balanced">LTX 2.3 Balanced</option>
+          <option value="custom">LTX 2.3 Custom</option>
         </Select>
       ) : (
         <Select

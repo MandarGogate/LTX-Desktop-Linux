@@ -490,8 +490,12 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         gemma_root: str | None,
         upsampler_path: str,
         device: str | object,
+        *,
+        lora_path: str | None = None,
+        lora_strength: float = 1.0,
+        extra_loras: list[tuple[str, float]] | None = None,
     ) -> "FakeFastVideoPipeline":
-        del checkpoint_path, gemma_root, upsampler_path, device
+        del checkpoint_path, gemma_root, upsampler_path, device, lora_path, lora_strength, extra_loras
         pipeline = FakeFastVideoPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeFastVideoPipeline singleton is not bound")
@@ -507,6 +511,8 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         frame_rate: float,
         images: list[ImageConditioningInput],
         output_path: str,
+        progress_callback: Any = None,
+        negative_prompt: str = "",
     ) -> None:
         self._record_generate(
             {
@@ -518,8 +524,13 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
                 "frame_rate": frame_rate,
                 "images": images,
                 "output_path": output_path,
+                "negative_prompt": negative_prompt,
             }
         )
+        # Simulate step progress
+        if progress_callback is not None:
+            for step in range(1, 9):
+                progress_callback(step, 8)
 
 
 class FakeZitOutput:
@@ -556,6 +567,11 @@ class FakeImageGenerationPipeline:
         self.generate_calls.append(kwargs)
         if self.raise_on_generate is not None:
             raise self.raise_on_generate
+        progress_callback = kwargs.get("progress_callback")
+        num_inference_steps = kwargs.get("num_inference_steps", 4)
+        if callable(progress_callback):
+            for step in range(1, int(num_inference_steps) + 1):
+                progress_callback(step, int(num_inference_steps))
         return FakeZitOutput(color="blue")
 
     def to(self, device: str) -> None:

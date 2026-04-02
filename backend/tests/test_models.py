@@ -20,8 +20,8 @@ def _model_path(test_state, model_type: str) -> Path:
 def _downloading_dir(test_state) -> Path:
     return resolve_downloading_dir(test_state.config.default_models_dir)
 
-DEFAULT_REQUIRED_MODEL_TYPES = ["checkpoint", "upsampler", "text_encoder", "zit"]
-DEFAULT_REQUIRED_MODEL_TYPES_WITHOUT_TEXT_ENCODER = ["checkpoint", "upsampler", "zit"]
+DEFAULT_REQUIRED_MODEL_TYPES = ["checkpoint", "upsampler", "text_encoder"]
+DEFAULT_REQUIRED_MODEL_TYPES_WITHOUT_TEXT_ENCODER = ["checkpoint", "upsampler"]
 
 
 class TestModelsList:
@@ -29,16 +29,18 @@ class TestModelsList:
         r = client.get("/api/models")
         assert r.status_code == 200
         data = r.json()
-        assert len(data) == 2
+        assert len(data) == 4
         assert data[0]["id"] == "fast"
         assert "8 steps" in data[0]["description"]
-        assert data[1]["id"] == "pro"
-        assert "20 steps" in data[1]["description"]
+        assert data[1]["id"] == "balanced"
+        assert data[2]["id"] == "quality"
+        assert "20 steps" in data[2]["description"]
+        assert data[3]["id"] == "custom"
 
     def test_custom_pro_steps(self, client, test_state):
         test_state.state.app_settings.pro_model.steps = 30
         r = client.get("/api/models")
-        assert "30 steps" in r.json()[1]["description"]
+        assert "30 steps" in r.json()[2]["description"]
 
 
 class TestModelsStatus:
@@ -69,13 +71,27 @@ class TestModelsStatus:
         r = client.get("/api/models/status")
         assert r.json()["all_downloaded"] is True
 
-    def test_with_api_key(self, client, create_fake_model_files, test_state):
+    def test_quantized_text_encoder_satisfies_requirement(self, client, create_fake_model_files, test_state):
         create_fake_model_files(include_zit=True)
-        test_state.state.app_settings.ltx_api_key = "test-key"
+        te_variant = test_state.models.models_dir / "text_encoders" / "gemma_3_12B_it_fp8_scaled.safetensors"
+        te_variant.parent.mkdir(parents=True, exist_ok=True)
+        te_variant.write_bytes(b"\x00" * 1024)
 
         r = client.get("/api/models/status")
-        te_model = next(m for m in r.json()["models"] if m["name"] == "gemma-3-12b-it-qat-q4_0-unquantized")
+        te_model = next(m for m in r.json()["models"] if m["id"] == "text_encoder")
         assert te_model["required"] is False
+        assert te_model["downloaded"] is True
+
+    def test_preferred_relative_gguf_zit_satisfies_requirement(self, client, test_state):
+        gguf_zit = test_state.models.models_dir / "gguf" / "z-image-turbo-BF16.gguf"
+        gguf_zit.parent.mkdir(parents=True, exist_ok=True)
+        gguf_zit.write_bytes(b"\x00" * 1024)
+        test_state.state.app_settings.preferred_zit_model_path = "gguf/z-image-turbo-BF16.gguf"
+
+        r = client.get("/api/models/status")
+        zit_model = next(m for m in r.json()["models"] if m["id"] == "zit")
+        assert zit_model["required"] is False
+        assert zit_model["downloaded"] is True
 
     def test_forced_mode_requires_no_local_models(self, client, test_state):
         test_state.config.force_api_generations = True
@@ -87,6 +103,57 @@ class TestModelsStatus:
 
         required_names = {m["name"] for m in data["models"] if m["required"]}
         assert required_names == set()
+
+
+class TestModelReadiness:
+    def test_empty_low_vram_setup_suggests_full_gguf_bundle(self, test_state):
+        data = test_state.models.get_model_readiness(vram_gb=8, gpu_name="Low VRAM GPU").model_dump()
+        suggested = {model["filename"] for model in data["suggested_models"]}
+        assert "distilled/ltx-2.3-22b-distilled-Q4_0.gguf" in suggested
+        assert "ltx-2.3-22b-dev-Q4_0.gguf" in suggested
+        assert "ltx-2.3-22b-distilled-lora-384.safetensors" in suggested
+        assert "gemma-3-12b-it-Q4_0.gguf" in suggested
+        assert "vae/LTX23_video_vae_bf16.safetensors" in suggested
+        assert "vae/LTX23_audio_vae_bf16.safetensors" in suggested
+
+    def test_gguf_and_text_encoder_without_decode_components_is_not_ready(self, test_state):
+        dm = test_state.models.models_dir / "diffusion_models"
+        dm.mkdir(parents=True, exist_ok=True)
+        (dm / "ltx-2.3-22b-distilled-Q4_0.gguf").write_bytes(b"\x00" * 1024)
+
+        te = test_state.models.models_dir / "text_encoders"
+        te.mkdir(parents=True, exist_ok=True)
+        (te / "gemma-3-12b-it-Q4_0.gguf").write_bytes(b"\x00" * 1024)
+
+        data = test_state.models.get_model_readiness(vram_gb=8, gpu_name="Low VRAM GPU").model_dump()
+        assert data["can_generate"] is False
+        suggested = {model["filename"] for model in data["suggested_models"]}
+        assert "ltx-2.3-22b-dev-Q4_0.gguf" in suggested
+        assert "ltx-2.3-22b-distilled-lora-384.safetensors" in suggested
+        assert "vae/LTX23_video_vae_bf16.safetensors" in suggested
+        assert "vae/LTX23_audio_vae_bf16.safetensors" in suggested
+
+    def test_split_decode_components_make_gguf_setup_ready(self, test_state):
+        dm = test_state.models.models_dir / "diffusion_models"
+        dm.mkdir(parents=True, exist_ok=True)
+        (dm / "ltx-2.3-22b-distilled-Q4_0.gguf").write_bytes(b"\x00" * 1024)
+        (dm / "ltx-2.3-22b-dev-Q4_0.gguf").write_bytes(b"\x00" * 1024)
+
+        te = test_state.models.models_dir / "text_encoders"
+        te.mkdir(parents=True, exist_ok=True)
+        (te / "gemma-3-12b-it-Q4_0.gguf").write_bytes(b"\x00" * 1024)
+
+        loras = test_state.models.models_dir / "loras"
+        loras.mkdir(parents=True, exist_ok=True)
+        (loras / "ltx-2.3-22b-distilled-lora-384.safetensors").write_bytes(b"\x00" * 1024)
+
+        vae = test_state.models.models_dir / "vae"
+        vae.mkdir(parents=True, exist_ok=True)
+        (vae / "LTX23_video_vae_bf16.safetensors").write_bytes(b"\x00" * 1024)
+        (vae / "LTX23_audio_vae_bf16.safetensors").write_bytes(b"\x00" * 1024)
+
+        data = test_state.models.get_model_readiness(vram_gb=8, gpu_name="Low VRAM GPU").model_dump()
+        assert data["can_generate"] is True
 
 
 class TestDownloadProgress:
@@ -141,11 +208,23 @@ class TestRequiredModels:
         assert r.status_code == 200
         assert r.json()["modelTypes"] == DEFAULT_REQUIRED_MODEL_TYPES_WITHOUT_TEXT_ENCODER
 
-    def test_api_key_auto_excludes_text_encoder(self, client, test_state):
-        test_state.state.app_settings.ltx_api_key = "test-key"
+    def test_quantized_variant_excludes_text_encoder(self, client, test_state):
+        te_variant = test_state.models.models_dir / "text_encoders" / "gemma_3_12B_it_fp8_scaled.safetensors"
+        te_variant.parent.mkdir(parents=True, exist_ok=True)
+        te_variant.write_bytes(b"\x00" * 1024)
         r = client.get("/api/models/required-models")
         assert r.status_code == 200
         assert r.json()["modelTypes"] == DEFAULT_REQUIRED_MODEL_TYPES_WITHOUT_TEXT_ENCODER
+
+    def test_preferred_relative_gguf_zit_excludes_zit(self, client, test_state):
+        gguf_zit = test_state.models.models_dir / "gguf" / "z-image-turbo-BF16.gguf"
+        gguf_zit.parent.mkdir(parents=True, exist_ok=True)
+        gguf_zit.write_bytes(b"\x00" * 1024)
+        test_state.state.app_settings.preferred_zit_model_path = "gguf/z-image-turbo-BF16.gguf"
+
+        r = client.get("/api/models/required-models")
+        assert r.status_code == 200
+        assert r.json()["modelTypes"] == ["checkpoint", "upsampler", "text_encoder"]
 
     def test_forced_mode_returns_empty_set(self, client, test_state):
         test_state.config.force_api_generations = True

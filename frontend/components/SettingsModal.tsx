@@ -1,4 +1,4 @@
-import { AlertCircle, Check, Download, Film, Folder, Info, KeyRound, Settings, Sliders, Sparkles, X, Zap } from 'lucide-react'
+import { AlertCircle, Check, Cpu, Download, Folder, Info, KeyRound, Settings, Sliders, Sparkles, Upload, X, Zap } from 'lucide-react'
 import React, { useEffect, useRef, useState } from 'react'
 import { Button } from './ui/button'
 import { useAppSettings, type AppSettings } from '../contexts/AppSettingsContext'
@@ -12,57 +12,153 @@ interface TextEncoderStatus {
   expected_size_gb: number
 }
 
+interface TextEncoderVariant {
+  filename: string
+  path: string
+  size_mb: number
+  format: string
+  quant_level?: string | null
+}
+
 interface SettingsModalProps {
   isOpen: boolean
   onClose: () => void
   initialTab?: TabId
 }
 
-type TabId = 'general' | 'apiKeys' | 'inference' | 'promptEnhancer' | 'about'
+type TabId = 'general' | 'apiKeys' | 'inference' | 'promptEnhancer' | 'advanced' | 'about'
 
 export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProps) {
-  const { settings, updateSettings, saveLtxApiKey, saveFalApiKey, saveGeminiApiKey, forceApiGenerations } = useAppSettings()
+  const { settings, updateSettings, saveLtxApiKey, saveFalApiKey, saveGeminiApiKey } = useAppSettings()
+  const isWebMode = !(window as any).__ELECTRON__
   const onSettingsChange = (next: AppSettings) => updateSettings(next)
   const [activeTab, setActiveTab] = useState<TabId>('general')
   const [ltxApiKeyInput, setLtxApiKeyInput] = useState('')
   const ltxApiKeyInputRef = useRef<HTMLInputElement>(null)
-  const [focusLtxApiKeyInputOnTabChange, setFocusLtxApiKeyInputOnTabChange] = useState(false)
   const [falApiKeyInput, setFalApiKeyInput] = useState('')
   const falApiKeyInputRef = useRef<HTMLInputElement>(null)
   const [geminiApiKeyInput, setGeminiApiKeyInput] = useState('')
   const geminiApiKeyInputRef = useRef<HTMLInputElement>(null)
   const [textEncoderStatus, setTextEncoderStatus] = useState<TextEncoderStatus | null>(null)
+  const [textEncoderVariants, setTextEncoderVariants] = useState<TextEncoderVariant[]>([])
   const [isDownloading, setIsDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [vramProfile, setVramProfile] = useState<any>(null)
+  const [loraList, setLoraList] = useState<any[]>([])
+  const [videoModelList, setVideoModelList] = useState<any[]>([])
+  const [loraUploading, setLoraUploading] = useState(false)
   const [appVersion, setAppVersion] = useState('')
+  const [externalModels, setExternalModels] = useState<any[]>([])
+  const [downloadingExternal, setDownloadingExternal] = useState<string | null>(null)
+  const [downloadExternalError, setDownloadExternalError] = useState<string | null>(null)
+  const [downloadExternalSuccess, setDownloadExternalSuccess] = useState<string | null>(null)
+  const [downloadExternalProgress, setDownloadExternalProgress] = useState(0)
+
+  // Fetch VRAM profile and LoRA list when advanced tab opens
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'advanced') return
+    backendFetch('/api/gpu/vram-profile').then(r => r.json()).then(setVramProfile).catch(() => {})
+    backendFetch('/api/gpu/loras').then(r => r.json()).then(d => setLoraList(d.loras || [])).catch(() => {})
+    backendFetch('/api/gpu/video-models').then(r => r.json()).then(d => setVideoModelList(d.models || [])).catch(() => {})
+    backendFetch('/api/gpu/text-encoders').then(r => r.json()).then(d => setTextEncoderVariants(d.variants || [])).catch(() => {})
+    backendFetch('/api/gpu/external-models').then(r => r.json()).then(d => setExternalModels(d.models || [])).catch(() => {})
+  }, [isOpen, activeTab])
+
+  const handleUploadLora = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setLoraUploading(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const res = await backendFetch('/api/gpu/loras/upload', { method: 'POST', body: formData })
+      if (res.ok) {
+        const d = await (await backendFetch('/api/gpu/loras')).json()
+        setLoraList(d.loras || [])
+      }
+    } catch (err) {
+      logger.error(`LoRA upload failed: ${err}`)
+    } finally {
+      setLoraUploading(false)
+      e.target.value = ''
+    }
+  }
+
+  const handleDownloadExternalModel = async (model: any) => {
+    setDownloadingExternal(model.id)
+    setDownloadExternalError(null)
+    setDownloadExternalSuccess(null)
+    try {
+      const targetSubdir = model.model_type === 'gguf' ? 'gguf' : model.model_type === 'lora' ? 'loras' : model.model_type === 'text_encoder' ? 'text_encoders' : ''
+      const res = await backendFetch('/api/gpu/download-external-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo_id: model.repo_id,
+          filename: model.filename,
+          target_subdir: targetSubdir,
+        }),
+      })
+      const data = await res.json()
+      if (data.status === 'already_downloaded') {
+        setDownloadExternalSuccess(`${model.filename} already downloaded`)
+      } else if (data.status === 'started') {
+        // Poll for completion with progress
+        const sessionId = data.session_id
+        setDownloadExternalProgress(0)
+        const poll = setInterval(async () => {
+          try {
+            const pr = await backendFetch(`/api/models/download/progress?sessionId=${sessionId}`)
+            const pd = await pr.json()
+            if (pd.total_progress) setDownloadExternalProgress(Math.min(99, Math.round(pd.total_progress)))
+            if (pd.status === 'complete') {
+              clearInterval(poll)
+              setDownloadingExternal(null)
+              setDownloadExternalProgress(100)
+              setDownloadExternalSuccess(`${model.filename} downloaded successfully`)
+              // Refresh external models list
+    backendFetch('/api/gpu/video-models').then(r => r.json()).then(d => setVideoModelList(d.models || [])).catch(() => {})
+    backendFetch('/api/gpu/text-encoders').then(r => r.json()).then(d => setTextEncoderVariants(d.variants || [])).catch(() => {})
+    backendFetch('/api/gpu/external-models').then(r => r.json()).then(d => {
+      setExternalModels(d.models || [])
+    }).catch(() => {})
+              backendFetch('/api/gpu/video-models').then(r => r.json()).then(d => setVideoModelList(d.models || [])).catch(() => {})
+              backendFetch('/api/gpu/loras').then(r => r.json()).then(d => setLoraList(d.loras || [])).catch(() => {})
+            } else if (pd.status === 'error') {
+              clearInterval(poll)
+              setDownloadingExternal(null)
+              setDownloadExternalProgress(0)
+              setDownloadExternalError(pd.error || 'Download failed')
+            }
+          } catch {
+            // ignore poll errors
+          }
+        }, 2000)
+        // Timeout after 60 minutes
+        setTimeout(() => { clearInterval(poll); setDownloadingExternal(null) }, 60 * 60 * 1000)
+      } else {
+        setDownloadExternalError(data.message || 'Failed to start download')
+        setDownloadingExternal(null)
+      }
+    } catch (err) {
+      setDownloadExternalError(err instanceof Error ? err.message : 'Download failed')
+      setDownloadingExternal(null)
+    }
+  }
   const [noticesText, setNoticesText] = useState<string | null>(null)
   const [noticesLoading, setNoticesLoading] = useState(false)
   const [showNotices, setShowNotices] = useState(false)
   const [modelLicenseText, setModelLicenseText] = useState<string | null>(null)
   const [modelLicenseLoading, setModelLicenseLoading] = useState(false)
   const [showModelLicense, setShowModelLicense] = useState(false)
-  const [analyticsEnabled, setAnalyticsEnabled] = useState(false)
   const [projectAssetsPath, setProjectAssetsPath] = useState('')
 
   // Sync active tab with initialTab prop when modal opens
   useEffect(() => {
     if (isOpen && initialTab) {
-      setActiveTab(initialTab)
+      setActiveTab(initialTab === 'apiKeys' || initialTab === 'promptEnhancer' ? 'general' : initialTab)
     }
   }, [isOpen, initialTab])
-
-  useEffect(() => {
-    if (!isOpen || activeTab !== 'apiKeys' || !focusLtxApiKeyInputOnTabChange) return
-
-    const frameId = window.requestAnimationFrame(() => {
-      ltxApiKeyInputRef.current?.focus()
-    })
-    setFocusLtxApiKeyInputOnTabChange(false)
-
-    return () => {
-      window.cancelAnimationFrame(frameId)
-    }
-  }, [activeTab, focusLtxApiKeyInputOnTabChange, isOpen])
 
   // Fetch app version when About tab is shown
   useEffect(() => {
@@ -70,12 +166,8 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
     window.electronAPI.getAppInfo().then(info => setAppVersion(info.version)).catch(() => {})
   }, [activeTab, appVersion])
 
-  // Fetch analytics state when modal opens
   useEffect(() => {
     if (!isOpen) return
-    window.electronAPI.getAnalyticsState()
-      .then((state: { analyticsEnabled: boolean }) => setAnalyticsEnabled(state.analyticsEnabled))
-      .catch(() => {})
     window.electronAPI.getProjectAssetsPath()
       .then((p: string) => setProjectAssetsPath(p))
       .catch(() => {})
@@ -158,26 +250,6 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
     })
   }
 
-  const handleToggleLocalEncoder = () => {
-    onSettingsChange({
-      ...settings,
-      useLocalTextEncoder: !settings.useLocalTextEncoder,
-    })
-  }
-
-  const openApiKeysAndFocusLtxInput = () => {
-    setActiveTab('apiKeys')
-    setFocusLtxApiKeyInputOnTabChange(true)
-  }
-
-  const handlePromptCacheSizeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const size = Math.max(0, Math.min(1000, parseInt(e.target.value) || 100))
-    onSettingsChange({
-      ...settings,
-      promptCacheSize: size,
-    })
-  }
-
   const handleFastUpscalerToggle = () => {
     onSettingsChange({
       ...settings,
@@ -200,6 +272,21 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
     })
   }
 
+  const handleCustomStepsChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const steps = Math.max(1, Math.min(100, parseInt(e.target.value) || 20))
+    onSettingsChange({
+      ...settings,
+      customModel: { ...settings.customModel, steps },
+    })
+  }
+
+  const handleCustomUpscalerToggle = () => {
+    onSettingsChange({
+      ...settings,
+      customModel: { ...settings.customModel, useUpscaler: !settings.customModel.useUpscaler },
+    })
+  }
+
   // Prompt Enhancer handlers
   const handleTogglePromptEnhancer = (mode: 't2v' | 'i2v') => {
     if (mode === 't2v') {
@@ -208,13 +295,6 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
       onSettingsChange({ ...settings, promptEnhancerEnabledI2V: !settings.promptEnhancerEnabledI2V })
     }
   }
-  // Analytics handler
-  const handleToggleAnalytics = () => {
-    const next = !analyticsEnabled
-    setAnalyticsEnabled(next)
-    window.electronAPI.setAnalyticsEnabled(next).catch(() => {})
-  }
-
   // Seed handlers
   const handleToggleSeedLock = () => {
     onSettingsChange({
@@ -266,9 +346,8 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
 
   const tabs = [
     { id: 'general' as TabId, label: 'General', icon: Settings },
-    { id: 'apiKeys' as TabId, label: 'API Keys', icon: KeyRound },
     { id: 'inference' as TabId, label: 'Inference', icon: Sliders },
-    { id: 'promptEnhancer' as TabId, label: 'Prompt Enhancer', icon: Sparkles },
+    { id: 'advanced' as TabId, label: 'GPU & Models', icon: Cpu },
     { id: 'about' as TabId, label: 'About', icon: Info },
   ]
 
@@ -333,213 +412,68 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                   Where generated video and image assets are saved. Each project gets a subfolder.
                 </p>
                 <div className="flex gap-2">
-                  <div className="flex-1 px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm truncate select-text">
-                    {projectAssetsPath || <span className="text-zinc-600">Not set</span>}
-                  </div>
-                  <Button
-                    variant="outline"
-                    className="border-zinc-700 flex-shrink-0"
-                    onClick={async () => {
-                      const result = await window.electronAPI.openProjectAssetsPathChangeDialog()
-                      if (result.success && result.path) {
-                        setProjectAssetsPath(result.path)
-                      }
-                    }}
-                  >
-                    <Folder className="h-4 w-4" />
-                  </Button>
+                  <input
+                    value={projectAssetsPath}
+                    onChange={(e) => setProjectAssetsPath(e.target.value)}
+                    placeholder={isWebMode ? 'Enter an absolute folder path on the server…' : 'Not set'}
+                    className="flex-1 px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  {isWebMode ? (
+                    <Button
+                      variant="outline"
+                      className="border-zinc-700 flex-shrink-0"
+                      onClick={async () => {
+                        const response = await backendFetch('/web/project-assets/path', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ path: projectAssetsPath }),
+                        })
+                        if (response.ok) {
+                          const data = await response.json()
+                          setProjectAssetsPath(data.path || projectAssetsPath)
+                        }
+                      }}
+                    >
+                      Save
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      className="border-zinc-700 flex-shrink-0"
+                      onClick={async () => {
+                        const result = await window.electronAPI.openProjectAssetsPathChangeDialog()
+                        if (result.success && result.path) {
+                          setProjectAssetsPath(result.path)
+                        }
+                      }}
+                    >
+                      <Folder className="h-4 w-4" />
+                    </Button>
+                  )}
                 </div>
               </div>
 
-              {!forceApiGenerations && (
-                <div className="space-y-4">
+              {/* Text Encoder status — compact */}
+              {!textEncoderStatus?.downloaded && (
+                <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <Film className="h-4 w-4 text-blue-400" />
-                    <h3 className="text-sm font-semibold text-white">Videos Generation</h3>
+                    <AlertCircle className="h-4 w-4 text-amber-400" />
+                    <h3 className="text-sm font-semibold text-white">Text Encoder Not Downloaded</h3>
                   </div>
-
-                  <div
-                    className={`bg-zinc-800/50 rounded-lg p-4 border-2 transition-colors cursor-pointer ${
-                      settings.userPrefersLtxApiVideoGenerations ? 'border-blue-500' : 'border-transparent hover:border-zinc-600'
-                    }`}
-                    onClick={() => {
-                      if (!settings.hasLtxApiKey) {
-                        openApiKeysAndFocusLtxInput()
-                        return
-                      }
-                      onSettingsChange({
-                        ...settings,
-                        userPrefersLtxApiVideoGenerations: !settings.userPrefersLtxApiVideoGenerations,
-                      })
-                    }}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <Zap className="h-4 w-4 text-blue-400" />
-                          <span className="text-sm font-medium text-white">Generate With API</span>
-                        </div>
-                        <p className="text-xs text-zinc-400 mt-1">
-                          Use LTX API for video generation when an LTX API key is configured.
-                        </p>
-                      </div>
-                      <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${
-                        settings.userPrefersLtxApiVideoGenerations ? 'border-blue-500 bg-blue-500' : 'border-zinc-600'
-                      }`}>
-                        {settings.userPrefersLtxApiVideoGenerations && <Check className="h-3 w-3 text-white" />}
-                      </div>
+                  <p className="text-xs text-zinc-500">Required for prompt encoding. ~{textEncoderStatus?.expected_size_gb || 8} GB download.</p>
+                  {isDownloading ? (
+                    <div className="flex items-center gap-2 text-xs text-blue-400">
+                      <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                      <span>Downloading text encoder...</span>
                     </div>
-
-                    {!settings.hasLtxApiKey && (
-                      <div className="mt-2 text-xs text-amber-400 flex items-center gap-1.5">
-                        <AlertCircle className="h-3 w-3" />
-                        API key required — configure it in the API Keys tab.
-                      </div>
-                    )}
-                  </div>
+                  ) : (
+                    <Button size="sm" onClick={handleDownloadTextEncoder} className="w-full bg-blue-600 hover:bg-blue-500 text-white text-xs">
+                      <Download className="h-3 w-3 mr-2" /> Download Text Encoder
+                    </Button>
+                  )}
+                  {downloadError && <p className="text-xs text-red-400">{downloadError}</p>}
                 </div>
               )}
-
-              {/* Text Encoding Section */}
-              <div className="space-y-4">
-                <div className="flex items-center gap-2">
-                  <svg className="h-4 w-4 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3m-6 0H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3" />
-                    <line x1="8" y1="12" x2="16" y2="12" />
-                  </svg>
-                  <h3 className="text-sm font-semibold text-white">Text Encoding</h3>
-                </div>
-
-                <p className="text-xs text-zinc-500 leading-relaxed">
-                  Text encoding converts your prompt into data the AI understands. Choose how to do this.
-                </p>
-
-                {/* LTX API Option (Default) */}
-                <div
-                  className={`bg-zinc-800/50 rounded-lg p-4 border-2 transition-colors cursor-pointer ${
-                    !settings.useLocalTextEncoder ? 'border-blue-500' : 'border-transparent hover:border-zinc-600'
-                  }`}
-                  onClick={() => {
-                    if (!settings.useLocalTextEncoder) return
-                    if (!settings.hasLtxApiKey) {
-                      openApiKeysAndFocusLtxInput()
-                      return
-                    }
-                    handleToggleLocalEncoder()
-                  }}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <Zap className="h-4 w-4 text-blue-400" />
-                        <span className="text-sm font-medium text-white">LTX API</span>
-                        <span className="text-xs px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded">Recommended</span>
-                      </div>
-                      <p className="text-xs text-zinc-400 mt-1">
-                        Fast cloud-based text encoding (~1 second). Requires an LTX API key configured in the API Keys tab.
-                      </p>
-                    </div>
-                    <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${
-                      !settings.useLocalTextEncoder ? 'border-blue-500 bg-blue-500' : 'border-zinc-600'
-                    }`}>
-                      {!settings.useLocalTextEncoder && <Check className="h-3 w-3 text-white" />}
-                    </div>
-                  </div>
-
-                  {/* Warning when selected but no key */}
-                  {!settings.useLocalTextEncoder && !settings.hasLtxApiKey && (
-                    <div className="mt-2 text-xs text-amber-400 flex items-center gap-1.5">
-                      <AlertCircle className="h-3 w-3" />
-                      API key required — configure it in the API Keys tab.
-                    </div>
-                  )}
-
-                  {/* Prompt Cache Size — only relevant for API text encoding */}
-                  {!settings.useLocalTextEncoder && settings.hasLtxApiKey && (
-                    <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-700/50">
-                      <div>
-                        <label className="text-xs text-white">Prompt Cache</label>
-                        <p className="text-xs text-zinc-500">Skip repeat encoding calls</p>
-                      </div>
-                      <input
-                        type="number"
-                        min="0"
-                        max="1000"
-                        value={settings.promptCacheSize ?? 100}
-                        onChange={handlePromptCacheSizeChange}
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-16 px-2 py-1 bg-zinc-700 border border-zinc-600 rounded text-xs text-white text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {/* Local Encoder Option */}
-                <div
-                  className={`bg-zinc-800/50 rounded-lg p-4 border-2 transition-colors cursor-pointer ${
-                    settings.useLocalTextEncoder ? 'border-blue-500' : 'border-transparent hover:border-zinc-600'
-                  }`}
-                  onClick={() => !settings.useLocalTextEncoder && handleToggleLocalEncoder()}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <svg className="h-4 w-4 text-zinc-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <rect x="4" y="4" width="16" height="16" rx="2" />
-                          <path d="M9 9h6m-6 3h6m-6 3h4" />
-                        </svg>
-                        <span className="text-sm font-medium text-white">Local Encoder</span>
-                      </div>
-                      <p className="text-xs text-zinc-400 mt-1">
-                        Run on your computer (~23 seconds). Requires 25 GB download.
-                      </p>
-                    </div>
-                    <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${
-                      settings.useLocalTextEncoder ? 'border-blue-500 bg-blue-500' : 'border-zinc-600'
-                    }`}>
-                      {settings.useLocalTextEncoder && <Check className="h-3 w-3 text-white" />}
-                    </div>
-                  </div>
-
-                  {/* Download Status - show when this option is selected */}
-                  {settings.useLocalTextEncoder && (
-                    <div className="mt-3 pt-3 border-t border-zinc-700/50">
-                      {textEncoderStatus?.downloaded ? (
-                        <div className="flex items-center gap-2 text-xs text-green-400">
-                          <Check className="h-4 w-4" />
-                          <span>Downloaded ({textEncoderStatus.size_gb} GB)</span>
-                        </div>
-                      ) : isDownloading ? (
-                        <div className="flex items-center gap-2 text-xs text-blue-400">
-                          <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-                          <span>Downloading text encoder...</span>
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2 text-xs text-amber-400">
-                            <AlertCircle className="h-4 w-4" />
-                            <span>Not downloaded ({textEncoderStatus?.expected_size_gb || 8} GB required)</span>
-                          </div>
-                          <Button
-                            size="sm"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              handleDownloadTextEncoder()
-                            }}
-                            className="w-full bg-blue-600 hover:bg-blue-500 text-white text-xs"
-                          >
-                            <Download className="h-3 w-3 mr-2" />
-                            Download Text Encoder
-                          </Button>
-                          {downloadError && (
-                            <p className="text-xs text-red-400">{downloadError}</p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
 
               {/* Load on Startup Setting */}
               <div className="space-y-3 pt-4 border-t border-zinc-800">
@@ -708,42 +642,6 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                 </div>
               </div>
 
-              {/* Anonymous Analytics Setting */}
-              <div className="space-y-3 pt-4 border-t border-zinc-800">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <svg className="h-4 w-4 text-violet-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="18" y1="20" x2="18" y2="10" />
-                        <line x1="12" y1="20" x2="12" y2="4" />
-                        <line x1="6" y1="20" x2="6" y2="14" />
-                      </svg>
-                      <label className="text-sm font-medium text-white">
-                        Anonymous Analytics
-                      </label>
-                    </div>
-                    <p className="text-xs text-zinc-500 leading-relaxed">
-                      Share anonymous usage data to help improve LTX Desktop.
-                      Only basic technical information is collected — never personal data or generated content.
-                    </p>
-                  </div>
-
-                  {/* Toggle Switch */}
-                  <button
-                    onClick={handleToggleAnalytics}
-                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                      analyticsEnabled ? 'bg-violet-500' : 'bg-zinc-700'
-                    }`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                        analyticsEnabled ? 'translate-x-5' : 'translate-x-0'
-                      }`}
-                    />
-                  </button>
-                </div>
-
-              </div>
             </>
           )}
 
@@ -945,7 +843,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <Zap className="h-4 w-4 text-green-400" />
-                  <h3 className="text-sm font-semibold text-white">Fast Model (Distilled)</h3>
+                  <h3 className="text-sm font-semibold text-white">LTX 2.3 Fast / Balanced</h3>
                 </div>
 
                 <div className="bg-zinc-800/50 rounded-lg p-4 space-y-4">
@@ -981,60 +879,58 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
 
                 {/* Summary */}
                 <div className="text-xs text-zinc-500">
-                  Current: 8 steps, {settings.fastModel?.useUpscaler !== false ? 'with upscaler (2-stage, recommended)' : 'native resolution (experimental)'}
+                  Current: 8 steps. Used by LTX 2.3 Fast (distilled) and LTX 2.3 Balanced (dev + distilled LoRA). {settings.fastModel?.useUpscaler !== false ? 'Upscaler enabled.' : 'Native resolution.'}
                 </div>
               </div>
 
-              {/* Pro Model Settings */}
               <div className="space-y-4 pt-4 border-t border-zinc-800">
                 <div className="flex items-center gap-2">
-                  <svg className="h-4 w-4 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                  <svg className="h-4 w-4 text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M3 7h18" />
+                    <path d="M6 12h12" />
+                    <path d="M10 17h4" />
                   </svg>
-                  <h3 className="text-sm font-semibold text-white">Pro Model (Full)</h3>
+                  <h3 className="text-sm font-semibold text-white">LTX 2.3 Custom</h3>
                 </div>
 
                 <div className="bg-zinc-800/50 rounded-lg p-4 space-y-4">
-                  {/* Steps */}
                   <div className="flex items-center justify-between">
                     <div>
                       <label className="text-sm text-white">Inference Steps</label>
-                      <p className="text-xs text-zinc-500">More steps = better quality, slower</p>
+                      <p className="text-xs text-zinc-500">Used only by Custom mode with the selected models from Settings</p>
                     </div>
                     <input
                       type="number"
                       min="1"
                       max="100"
-                      value={settings.proModel?.steps ?? 20}
-                      onChange={handleProStepsChange}
-                      className="w-20 px-3 py-1.5 bg-zinc-700 border border-zinc-600 rounded-lg text-sm text-white text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      value={settings.customModel?.steps ?? 20}
+                      onChange={handleCustomStepsChange}
+                      className="w-20 px-3 py-1.5 bg-zinc-700 border border-zinc-600 rounded-lg text-sm text-white text-center focus:outline-none focus:ring-2 focus:ring-amber-500"
                     />
                   </div>
 
-                  {/* Upscaler Toggle */}
                   <div className="flex items-center justify-between">
                     <div>
                       <label className="text-sm text-white">2x Upscaler</label>
-                      <p className="text-xs text-zinc-500">Doubles resolution in second pass</p>
+                      <p className="text-xs text-zinc-500">Saved with Custom mode settings for future pipeline support</p>
                     </div>
                     <button
-                      onClick={handleProUpscalerToggle}
+                      onClick={handleCustomUpscalerToggle}
                       className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                        settings.proModel?.useUpscaler !== false ? 'bg-blue-500' : 'bg-zinc-700'
+                        settings.customModel?.useUpscaler !== false ? 'bg-amber-500' : 'bg-zinc-700'
                       }`}
                     >
                       <span
                         className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                          settings.proModel?.useUpscaler !== false ? 'translate-x-5' : 'translate-x-0'
+                          settings.customModel?.useUpscaler !== false ? 'translate-x-5' : 'translate-x-0'
                         }`}
                       />
                     </button>
                   </div>
                 </div>
 
-                {/* Summary */}
                 <div className="text-xs text-zinc-500">
-                  Current: {settings.proModel?.steps ?? 20} steps, {settings.proModel?.useUpscaler !== false ? 'with upscaler (2-stage, recommended)' : 'native resolution'}
+                  Current: {settings.customModel?.steps ?? 20} steps. Custom mode uses the selected checkpoint/GGUF, LoRAs, and text encoder from Settings.
                 </div>
               </div>
 
@@ -1131,6 +1027,452 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                     </div>
                   </>
                 )}
+              </div>
+            </>
+          )}
+
+          {activeTab === 'advanced' && (
+            <>
+              {/* GPU Info */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Cpu className="h-4 w-4 text-blue-400" />
+                  <h3 className="text-sm font-semibold text-white">Your GPU</h3>
+                </div>
+
+                {vramProfile ? (
+                  <div className="bg-zinc-800/50 rounded-lg p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-zinc-300">VRAM</span>
+                      <span className="text-sm font-medium text-white">{vramProfile.vram_total_gb} GB</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-zinc-300">Tier</span>
+                      <span className={`text-xs px-2 py-0.5 rounded font-medium ${
+                        vramProfile.tier === 'high' ? 'bg-green-500/20 text-green-400' :
+                        vramProfile.tier === 'medium' ? 'bg-yellow-500/20 text-yellow-400' :
+                        'bg-red-500/20 text-red-400'
+                      }`}>{vramProfile.tier.toUpperCase()}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-zinc-300">Max Resolution</span>
+                      <span className="text-sm text-white">{vramProfile.max_resolution}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-zinc-300">SageAttention</span>
+                      <span className={`text-xs px-2 py-0.5 rounded ${
+                        vramProfile.sage_attention_available ? 'bg-green-500/20 text-green-400' : 'bg-zinc-700 text-zinc-400'
+                      }`}>{vramProfile.sage_attention_available ? 'Available ✓' : 'Not installed'}</span>
+                    </div>
+                    <div className="text-xs text-zinc-500 pt-2 border-t border-zinc-700">
+                      Max frames: 1080p={vramProfile.max_frames_1080p} · 720p={vramProfile.max_frames_720p} · 540p={vramProfile.max_frames_540p}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-zinc-800/50 rounded-lg p-4 text-sm text-zinc-400">
+                    Loading GPU info...
+                  </div>
+                )}
+              </div>
+
+              {/* Run Mode Selector */}
+              <div className="space-y-3 pt-4 border-t border-zinc-800">
+                <div className="flex items-center gap-2">
+                  <Sliders className="h-4 w-4 text-blue-400" />
+                  <h3 className="text-sm font-semibold text-white">Run Configuration</h3>
+                </div>
+                <p className="text-xs text-zinc-500">
+                  Choose how aggressively the app offloads models. Auto selects the fastest config for your GPU. Lower VRAM modes work on weaker GPUs but are slower.
+                </p>
+                <select
+                  value={settings.runMode || 'auto'}
+                  onChange={(e) => onSettingsChange({ ...settings, runMode: e.target.value })}
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {vramProfile?.run_modes?.map((mode: any) => (
+                    <option key={mode.value} value={mode.value}>
+                      {mode.label} — {mode.description}
+                    </option>
+                  )) || (
+                    <>
+                      <option value="auto">Auto (detect from GPU)</option>
+                      <option value="high_vram">High VRAM (≥24 GB)</option>
+                      <option value="medium_vram">Medium VRAM (16-23 GB)</option>
+                      <option value="low_vram">Low VRAM (12-15 GB)</option>
+                      <option value="very_low_vram">Very Low VRAM (8-11 GB)</option>
+                    </>
+                  )}
+                </select>
+                <div className={`text-xs px-2 py-1 rounded inline-flex items-center gap-1.5 ${
+                  settings.runMode === 'auto' ? 'bg-blue-500/10 text-blue-400' : 'bg-yellow-500/10 text-yellow-400'
+                }`}>
+                  <div className={`w-1.5 h-1.5 rounded-full ${
+                    settings.runMode === 'auto' ? 'bg-blue-400' : 'bg-yellow-400'
+                  }`} />
+                  {settings.runMode === 'auto'
+                    ? `Auto-detected tier: ${vramProfile?.auto_tier?.toUpperCase() || '...'}`
+                    : `Manual override: ${settings.runMode.replace('_', ' ')}`
+                  }
+                </div>
+              </div>
+
+              {/* Block Swap Controls */}
+              <div className="space-y-3 pt-4 border-t border-zinc-800">
+                <div className="flex items-center gap-2">
+                  <Cpu className="h-4 w-4 text-purple-400" />
+                  <h3 className="text-sm font-semibold text-white">Transformer Block Swap</h3>
+                </div>
+                <p className="text-xs text-zinc-500">
+                  Controls how many of the 48 transformer blocks stay on GPU during generation. More blocks on GPU = faster but uses more VRAM. Set to -1 for automatic.
+                </p>
+                <div className="bg-zinc-800/50 rounded-lg p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-zinc-300">Blocks on GPU</span>
+                    <span className="text-sm font-medium text-white">
+                      {settings.numBlocksToSwap < 0
+                        ? `Auto (${vramProfile?.auto_blocks_on_gpu ?? '...'})`
+                        : settings.numBlocksToSwap
+                      }
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="-1"
+                    max="48"
+                    step="1"
+                    value={settings.numBlocksToSwap}
+                    onChange={(e) => onSettingsChange({ ...settings, numBlocksToSwap: parseInt(e.target.value) })}
+                    className="w-full accent-purple-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-zinc-500">
+                    <span>Auto (-1)</span>
+                    <span>0 (min VRAM)</span>
+                    <span>24 (balanced)</span>
+                    <span>48 (max speed)</span>
+                  </div>
+                  {settings.numBlocksToSwap >= 0 && (
+                    <button
+                      onClick={() => onSettingsChange({ ...settings, numBlocksToSwap: -1 })}
+                      className="text-xs text-blue-400 hover:text-blue-300 underline underline-offset-2"
+                    >
+                      Reset to Auto
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Download Models from HuggingFace */}
+              <div className="space-y-3 pt-4 border-t border-zinc-800">
+                <div className="flex items-center gap-2">
+                  <Download className="h-4 w-4 text-green-400" />
+                  <h3 className="text-sm font-semibold text-white">Download Models</h3>
+                </div>
+                <p className="text-xs text-zinc-500">
+                  Download GGUF quantized models, distilled LoRA, and checkpoints directly from HuggingFace.
+                </p>
+                {downloadExternalSuccess && (
+                  <div className="flex items-center gap-2 text-xs text-green-400 bg-green-500/10 px-3 py-2 rounded-lg">
+                    <Check className="h-3 w-3" />
+                    <span>{downloadExternalSuccess}</span>
+                  </div>
+                )}
+                {downloadExternalError && (
+                  <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/10 px-3 py-2 rounded-lg">
+                    <AlertCircle className="h-3 w-3" />
+                    <span>{downloadExternalError}</span>
+                  </div>
+                )}
+                <div className="space-y-4">
+                  {[
+                    { title: 'LTX Video GGUF Models', items: externalModels.filter((m: any) => m.model_type === 'gguf' && !m.id?.startsWith('zit-gguf')) },
+                    { title: 'LTX Checkpoints & LoRAs', items: externalModels.filter((m: any) => m.model_type === 'checkpoint' || m.model_type === 'lora') },
+                    { title: 'Z-Image GGUF Models', items: externalModels.filter((m: any) => m.id?.startsWith('zit-gguf')) },
+                    { title: 'Text Encoders', items: externalModels.filter((m: any) => m.model_type === 'text_encoder') },
+                  ].map((group) => group.items.length > 0 && (
+                    <div key={group.title} className="space-y-2">
+                      <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{group.title}</h4>
+                      {group.items.map((model: any) => {
+                        const isDownloaded = model.description?.includes('[DOWNLOADED]')
+                        const isDownloading = downloadingExternal === model.id
+                        const cleanDesc = model.description?.replace(' [DOWNLOADED]', '') || ''
+                        const displayName = typeof model.filename === 'string' ? model.filename.split('/').pop() : model.filename
+                        return (
+                          <div key={model.id} className={`bg-zinc-800/50 rounded-lg px-4 py-3 border ${
+                            isDownloaded ? 'border-green-500/30' : 'border-zinc-700/50'
+                          }`}>
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm text-white truncate">{displayName}</span>
+                                  {model.quant_level && (
+                                    <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded flex-shrink-0">{model.quant_level}</span>
+                                  )}
+                                  <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${
+                                    model.model_type === 'gguf' ? 'bg-purple-500/20 text-purple-400' :
+                                    model.model_type === 'lora' ? 'bg-green-500/20 text-green-400' :
+                                    model.model_type === 'text_encoder' ? 'bg-cyan-500/20 text-cyan-400' :
+                                    'bg-zinc-700 text-zinc-400'
+                                  }`}>{model.model_type}</span>
+                                </div>
+                                <p className="text-xs text-zinc-500 mt-0.5">{cleanDesc} · {model.size_gb} GB</p>
+                              </div>
+                              {isDownloaded ? (
+                                <span className="text-xs text-green-400 flex items-center gap-1 flex-shrink-0">
+                                  <Check className="h-3 w-3" /> Downloaded
+                                </span>
+                              ) : isDownloading ? (
+                                <div className="flex flex-col gap-1 flex-shrink-0 min-w-[120px]">
+                                  <span className="text-xs text-blue-400 flex items-center gap-1">
+                                    <div className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                                    {downloadExternalProgress > 0 ? `${downloadExternalProgress}%` : 'Starting...'}
+                                  </span>
+                                  <div className="w-full h-1.5 bg-zinc-700 rounded-full overflow-hidden">
+                                    <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${downloadExternalProgress}%` }} />
+                                  </div>
+                                </div>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  onClick={() => handleDownloadExternalModel(model)}
+                                  disabled={!!downloadingExternal}
+                                  className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 flex-shrink-0"
+                                >
+                                  <Download className="h-3 w-3 mr-1" />
+                                  Download
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ))}
+                </div>
+                <div className="text-xs text-zinc-500 space-y-1">
+                  <p>Sources: <a href="https://huggingface.co/unsloth/LTX-2.3-GGUF" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline">unsloth/LTX-2.3-GGUF</a> · <a href="https://huggingface.co/unsloth/Z-Image-Turbo-GGUF" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline">unsloth/Z-Image-Turbo-GGUF</a> · <a href="https://huggingface.co/Lightricks/LTX-2.3" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline">Lightricks/LTX-2.3</a> · <a href="https://huggingface.co/Comfy-Org/ltx-2/tree/main/split_files/text_encoders" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline">Comfy-Org text encoders</a></p>
+                </div>
+              </div>
+
+              {/* Model Recommendations */}
+              {vramProfile?.model_recommendations?.length > 0 && (
+                <div className="space-y-3 pt-4 border-t border-zinc-800">
+                  <h3 className="text-sm font-semibold text-white">Recommended Models for Your GPU</h3>
+                  <div className="space-y-2">
+                    {vramProfile.model_recommendations.map((rec: any, i: number) => (
+                      <div key={i} className={`bg-zinc-800/50 rounded-lg px-4 py-3 border ${
+                        rec.recommended === 'true' ? 'border-blue-500/50' : 'border-transparent'
+                      }`}>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-white">{rec.model}</span>
+                          {rec.recommended === 'true' && (
+                            <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded">Best for you</span>
+                          )}
+                        </div>
+                        <p className="text-xs text-zinc-400 mt-0.5">{rec.desc}</p>
+                      </div>
+                    ))}
+                  </div>
+                  {vramProfile.gguf_recommended && (
+                    <p className="text-xs text-zinc-500">
+                      💡 Recommended quantization: <span className="text-blue-400 font-medium">{vramProfile.recommended_gguf_quant}</span> — place GGUF files in your models/gguf folder.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Default local model selection */}
+              <div className="space-y-3 pt-4 border-t border-zinc-800">
+                <h3 className="text-sm font-semibold text-white">Default Local Video Model</h3>
+                <p className="text-xs text-zinc-500">
+                  Pick the base model used for local generation. Automatic falls back to the app default.
+                </p>
+                <select
+                  value={settings.preferredModelPath || ''}
+                  onChange={(e) => onSettingsChange({ ...settings, preferredModelPath: e.target.value })}
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Automatic</option>
+                  {videoModelList.map((model: any) => (
+                    <option key={model.path} value={model.path}>
+                      {model.filename}{model.quant_level ? ` (${model.quant_level})` : ''}
+                    </option>
+                  ))}
+                </select>
+                {videoModelList.length === 0 && (
+                  <p className="text-xs text-amber-400">No selectable video models were found under your models directory.</p>
+                )}
+              </div>
+
+              {/* Z-Image model selection */}
+              <div className="space-y-3 pt-4 border-t border-zinc-800">
+                <h3 className="text-sm font-semibold text-white">Z-Image Model</h3>
+                <p className="text-xs text-zinc-500">
+                  Choose which Z-Image-Turbo model to use for image generation. GGUF versions use less VRAM.
+                </p>
+                <select
+                  value={settings.preferredZitModelPath || ''}
+                  onChange={(e) => onSettingsChange({ ...settings, preferredZitModelPath: e.target.value })}
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Default (full model)</option>
+                  {externalModels.filter((m: any) => m.id?.startsWith('zit-gguf')).map((model: any) => {
+                    const isDownloaded = model.description?.includes('[DOWNLOADED]')
+                    const displayName = model.filename.split('/').pop()
+                    return (
+                      <option key={model.id} value={`gguf/${displayName}`} disabled={!isDownloaded}>
+                        {displayName}{model.quant_level ? ` (${model.quant_level})` : ''} — {model.size_gb} GB {!isDownloaded ? '(not downloaded)' : '✓'}
+                      </option>
+                    )
+                  })}
+                </select>
+              </div>
+
+              {/* Text Encoder selection */}
+              <div className="space-y-3 pt-4 border-t border-zinc-800">
+                <h3 className="text-sm font-semibold text-white">Text Encoder</h3>
+                <p className="text-xs text-zinc-500">
+                  Choose a pre-quantized text encoder for faster loading. FP8 is ~8 GB vs ~23 GB for BF16. Download from the Models section below.
+                </p>
+                <select
+                  value={settings.preferredTextEncoderPath || ''}
+                  onChange={(e) => onSettingsChange({ ...settings, preferredTextEncoderPath: e.target.value })}
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Default (bundled Gemma)</option>
+                  {textEncoderVariants.map((variant) => {
+                    const relativePath = `text_encoders/${variant.filename}`
+                    return (
+                      <option key={variant.path} value={relativePath}>
+                        {variant.filename}
+                        {variant.quant_level ? ` (${variant.quant_level})` : ''}
+                        {` — ${(variant.size_mb / 1024).toFixed(1)} GB`}
+                        {variant.format === 'gguf' ? ' [GGUF]' : variant.format === 'folder' ? ' [Folder]' : ''}
+                      </option>
+                    )
+                  })}
+                </select>
+              </div>
+              <div className="space-y-3 pt-4 border-t border-zinc-800">
+                <h3 className="text-sm font-semibold text-white">Generation LoRAs</h3>
+                <p className="text-xs text-zinc-500">
+                  Enable one or more LoRAs and set their strengths. All enabled LoRAs are applied during local generation.
+                </p>
+                {loraList.filter((l: any) => !l.is_ic_lora).length > 0 ? (
+                  <div className="space-y-2">
+                    {(() => {
+                      const selectedModelPath = (settings.preferredModelPath || '').toLowerCase()
+                      const baseModelIsDistilled = selectedModelPath.includes('distilled')
+                      return loraList.filter((l: any) => !l.is_ic_lora).map((lora: any) => {
+                        const isDistilledLoraOnDistilledModel = lora.is_distilled && baseModelIsDistilled
+                        const selected = settings.selectedLoras.find((entry: any) => entry.path === lora.path)
+                        const enabled = !!selected && !isDistilledLoraOnDistilledModel
+                        const strength = selected?.strength ?? lora.suggested_strength ?? 0.8
+                        return (
+                          <div key={lora.path} className={`bg-zinc-800/50 rounded-lg px-4 py-3 border border-zinc-700/50 ${isDistilledLoraOnDistilledModel ? 'opacity-50' : ''}`}>
+                            <label className="flex items-center gap-3 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={enabled}
+                                disabled={isDistilledLoraOnDistilledModel}
+                                onChange={(e) => {
+                                  const next = settings.selectedLoras.filter((entry: any) => entry.path !== lora.path)
+                                  if (e.target.checked) next.push({ path: lora.path, strength })
+                                  onSettingsChange({ ...settings, selectedLoras: next })
+                                }}
+                                className="accent-blue-500"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="text-sm text-white truncate">{lora.filename}</span>
+                                  {lora.is_distilled && <span className="text-[10px] px-1.5 py-0.5 bg-green-500/20 text-green-400 rounded flex-shrink-0">Distilled</span>}
+                                </div>
+                                {isDistilledLoraOnDistilledModel ? (
+                                  <p className="text-xs text-amber-400 mt-1">Skipped — your selected model is already distilled</p>
+                                ) : (
+                                  <p className="text-xs text-zinc-500 mt-1">Suggested strength: {lora.suggested_strength}</p>
+                                )}
+                              </div>
+                            </label>
+                            {enabled && !isDistilledLoraOnDistilledModel && (
+                              <div className="mt-3 space-y-1">
+                                <div className="flex items-center justify-between text-xs text-zinc-400">
+                                  <span>Strength</span>
+                                  <span>{strength.toFixed(2)}</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min="0"
+                                  max="2"
+                                  step="0.05"
+                                  value={strength}
+                                  onChange={(e) => {
+                                    const next = settings.selectedLoras.map((entry: any) => entry.path === lora.path ? { ...entry, strength: Number(e.target.value) } : entry)
+                                    onSettingsChange({ ...settings, selectedLoras: next })
+                                  }}
+                                  className="w-full accent-blue-500"
+                                />
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })
+                    })()}
+                  </div>
+                ) : (
+                  <p className="text-xs text-zinc-500">No LoRAs found. Put LoRA safetensors in <code>models/loras</code> or upload one below.</p>
+                )}
+              </div>
+
+              {/* LoRA Management */}
+              <div className="space-y-3 pt-4 border-t border-zinc-800">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-white">LoRA Models</h3>
+                  <label className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg cursor-pointer transition-colors ${
+                    loraUploading ? 'bg-zinc-700 text-zinc-400' : 'bg-blue-600 hover:bg-blue-500 text-white'
+                  }`}>
+                    <Upload className="h-3 w-3" />
+                    {loraUploading ? 'Uploading...' : 'Upload LoRA'}
+                    <input type="file" accept=".safetensors" className="hidden" onChange={handleUploadLora} disabled={loraUploading} />
+                  </label>
+                </div>
+
+                <p className="text-xs text-zinc-500">
+                  Add custom LoRA files (.safetensors) to enhance generation style. Distilled LoRA uses 8 fast steps even with the dev base model.
+                </p>
+
+                {loraList.length > 0 ? (
+                  <div className="space-y-2">
+                    {loraList.map((lora: any, i: number) => (
+                      <div key={i} className="bg-zinc-800/50 rounded-lg px-4 py-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-sm text-white truncate">{lora.filename}</span>
+                            {lora.is_distilled && <span className="text-[10px] px-1.5 py-0.5 bg-green-500/20 text-green-400 rounded flex-shrink-0">Distilled</span>}
+                            {lora.is_ic_lora && <span className="text-[10px] px-1.5 py-0.5 bg-purple-500/20 text-purple-400 rounded flex-shrink-0">IC-LoRA</span>}
+                          </div>
+                          <span className="text-xs text-zinc-500 flex-shrink-0 ml-2">{lora.size_mb} MB</span>
+                        </div>
+                        <p className="text-xs text-zinc-500 mt-1">
+                          Suggested strength: {lora.suggested_strength} · {lora.is_distilled ? '8-step distilled schedule' : lora.is_ic_lora ? 'Image conditioning' : 'Custom style'}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="bg-zinc-800/30 rounded-lg p-4 text-center">
+                    <p className="text-sm text-zinc-400">No LoRA files found</p>
+                    <p className="text-xs text-zinc-500 mt-1">Upload a .safetensors LoRA or place files in your models/loras folder</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Tips */}
+              <div className="bg-zinc-800/30 rounded-lg p-3 mt-4">
+                <p className="text-xs text-zinc-400">
+                  <span className="text-blue-400 font-medium">Quick guide:</span> Your GPU uses block swap + FP8 to fit
+                  the 22B model in VRAM. SageAttention speeds up the attention layers. Distilled LoRA lets you use the
+                  high-quality dev base model with only 8 inference steps.
+                </p>
               </div>
             </>
           )}

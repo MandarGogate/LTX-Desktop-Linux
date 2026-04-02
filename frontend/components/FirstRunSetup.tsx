@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { backendFetch } from '../lib/backend'
 import { logger } from '../lib/logger'
 import './FirstRunSetup.css'
@@ -25,8 +25,33 @@ interface DownloadProgress {
   speed_bytes_per_sec: number
 }
 
-interface RequiredModelsResponse {
-  modelTypes: string[]
+interface SuggestedModel {
+  id: string
+  filename: string
+  repo_id: string
+  description: string
+  size_gb: number
+  target_subdir: string
+  quant_level: string | null
+  category: string
+}
+
+interface ModelReadiness {
+  can_generate: boolean
+  has_diffusion_model: boolean
+  has_text_encoder: boolean
+  has_upscaler: boolean
+  vram_gb: number | null
+  gpu_name: string | null
+  suggested_models: SuggestedModel[]
+  total_download_gb: number
+}
+
+interface StartupRecommendation {
+  title: string
+  filename: string
+  href: string
+  note: string
 }
 
 // Fun loading messages
@@ -54,14 +79,62 @@ export function LaunchGate({
   const [downloadError, setDownloadError] = useState<string | null>(null)
   const [downloadSessionId, setDownloadSessionId] = useState<string | null>(null)
   const [installMessage, setInstallMessage] = useState(INSTALL_MESSAGES[0])
-  const [availableSpace, setAvailableSpace] = useState('...')
   const [videoPath, setVideoPath] = useState('/splash/splash.mp4')
-  const [ltxApiKey, setLtxApiKey] = useState('')
+  const ltxApiKey = ''
   const [licenseAccepted, setLicenseAccepted] = useState(false)
   const [licenseText, setLicenseText] = useState<string | null>(null)
   const [licenseError, setLicenseError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [isActionPending, setIsActionPending] = useState(false)
+
+  // Readiness state
+  const [readiness, setReadiness] = useState<ModelReadiness | null>(null)
+  const [readinessLoading, setReadinessLoading] = useState(true)
+
+  const getStartupRecommendations = (): StartupRecommendation[] => {
+    const vram: number | null = readiness?.vram_gb ?? null
+    const lowVram = vram === null || vram < 12
+    const mediumVram = vram !== null && vram >= 12 && vram < 24
+    const textEncoderFilename = lowVram
+      ? 'gemma-3-12b-it-Q4_0.gguf'
+      : mediumVram
+        ? 'gemma-3-12b-it-Q4_K_M.gguf'
+        : 'gemma-3-12b-it-Q8_0.gguf'
+    const textEncoderNote = lowVram
+      ? 'GGUF text encoder for 8-11 GB GPUs. Smallest recommended local option.'
+      : mediumVram
+        ? 'GGUF text encoder for 12-23 GB GPUs. Better quality without the full Q8 memory cost.'
+        : 'GGUF text encoder for 24+ GB GPUs. Highest recommended local quality.'
+
+    return [
+      {
+        title: 'Text Encoder',
+        filename: textEncoderFilename,
+        href: 'https://huggingface.co/unsloth/gemma-3-12b-it-GGUF',
+        note: textEncoderNote,
+      },
+      {
+        title: 'Fast Mode Base',
+        filename: lowVram
+          ? 'ltx-2.3-22b-distilled-Q4_0.gguf'
+          : mediumVram
+            ? 'ltx-2.3-22b-distilled-Q4_K_M.gguf'
+            : 'ltx-2.3-22b-distilled-Q8_0.gguf',
+        href: 'https://huggingface.co/unsloth/LTX-2.3-GGUF/tree/main',
+        note: 'Used by Fast mode. Distilled base, no LoRA.',
+      },
+      {
+        title: 'Balanced / Quality Base',
+        filename: lowVram
+          ? 'ltx-2.3-22b-dev-Q4_0.gguf'
+          : mediumVram
+            ? 'ltx-2.3-22b-dev-Q4_K_M.gguf'
+            : 'ltx-2.3-22b-dev-Q8_0.gguf',
+        href: 'https://huggingface.co/unsloth/LTX-2.3-GGUF/tree/main',
+        note: 'Used by Balanced and Quality modes.',
+      },
+    ]
+  }
 
   // Format bytes to human readable
   const formatBytes = (bytes: number): string => {
@@ -101,18 +174,44 @@ export function LaunchGate({
     }
   }
 
+  // Fetch model readiness
+  const fetchReadiness = useCallback(async () => {
+    try {
+      setReadinessLoading(true)
+      const response = await backendFetch('/api/models/readiness')
+      if (response.ok) {
+        const data = await response.json() as ModelReadiness
+        setReadiness(data)
+
+        // If already can generate, auto-complete setup
+        if (data.can_generate) {
+          logger.info('Models already available, skipping first-run download')
+          try {
+            await onComplete()
+          } catch (e) {
+            logger.error(`Failed to auto-complete setup: ${e}`)
+          }
+          return
+        }
+      }
+    } catch (e) {
+      logger.error(`Failed to fetch model readiness: ${e}`)
+    } finally {
+      setReadinessLoading(false)
+    }
+  }, [onComplete])
+
   // Initialize
   useEffect(() => {
     const init = async () => {
       try {
-        // Get video path for production (unpacked from asar)
+        // Get video path for production
         try {
           const resourcePath = await window.electronAPI.getResourcePath?.()
           if (resourcePath) {
             setVideoPath(`file://${resourcePath}/app.asar.unpacked/dist/splash/splash.mp4`)
           }
         } catch {
-          // Dev mode: use relative path
           setVideoPath('/splash/splash.mp4')
         }
 
@@ -129,8 +228,10 @@ export function LaunchGate({
           logger.error(`Failed to get models path: ${e}`)
         }
 
-        // TODO: Get actual available space
-        setAvailableSpace('1.8 TB')
+        // Fetch readiness if we're on or past the location step
+        if (!showLicenseStep) {
+          await fetchReadiness()
+        }
       } catch (e) {
         logger.error(`Init error: ${e}`)
       }
@@ -139,7 +240,14 @@ export function LaunchGate({
     if (showLicenseStep) {
       void fetchLicense()
     }
-  }, [showLicenseStep])
+  }, [showLicenseStep, fetchReadiness])
+
+  // Fetch readiness when moving to location step
+  useEffect(() => {
+    if (currentStep === 'location' && readiness === null) {
+      void fetchReadiness()
+    }
+  }, [currentStep, readiness, fetchReadiness])
 
   // Cycle install messages
   useEffect(() => {
@@ -179,11 +287,11 @@ export function LaunchGate({
     return () => clearInterval(interval)
   }, [currentStep, downloadSessionId])
 
-  // Start installation
+  // Start installation with selected models
   const startInstallation = async () => {
     setCurrentStep('installing')
     try {
-      // If API key is provided, save it to settings first and skip text encoder download
+      // If API key is provided, save it first
       if (ltxApiKey.trim()) {
         try {
           await backendFetch('/api/settings', {
@@ -196,34 +304,91 @@ export function LaunchGate({
         }
       }
 
-      // Start download - skip text encoder if API key is provided
-      const skipTextEncoder = !!ltxApiKey.trim()
-      const requiredModelsResponse = await backendFetch(`/api/models/required-models?skipTextEncoder=${skipTextEncoder}`)
-      const requiredModels = requiredModelsResponse.ok
-        ? await requiredModelsResponse.json() as RequiredModelsResponse
-        : { modelTypes: [] }
+      // Download selected suggested models via external-model download
+      const modelsToDownload = readiness?.suggested_models ?? []
 
-      const downloadResponse = await backendFetch('/api/models/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelTypes: requiredModels.modelTypes }),
-      })
-      if (downloadResponse.ok) {
-        const downloadData = await downloadResponse.json()
-        if (downloadData.sessionId) {
-          setDownloadSessionId(downloadData.sessionId)
+      if (modelsToDownload.length === 0) {
+        // Nothing to download, go straight to complete
+        setCurrentStep('complete')
+        return
+      }
+
+      // Download them sequentially using the external model download endpoint
+      for (const model of modelsToDownload) {
+        const downloadResponse = await backendFetch('/api/gpu/download-external-model', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            repo_id: model.repo_id,
+            filename: model.filename,
+            is_folder: false,
+            target_subdir: model.target_subdir,
+          }),
+        })
+
+        if (downloadResponse.ok) {
+          const downloadData = await downloadResponse.json()
+          if (downloadData.session_id) {
+            setDownloadSessionId(downloadData.session_id)
+
+            // Wait for this download to complete
+            await waitForDownload(downloadData.session_id)
+          } else if (downloadData.status === 'already_downloaded') {
+            continue
+          }
+        } else {
+          const errorText = await downloadResponse.text()
+          throw new Error(`Download failed for ${model.description}: ${errorText}`)
         }
       }
+
+      // If we didn't get a session from the loop, go to complete
+      setCurrentStep('complete')
     } catch (e) {
       logger.error(`Download start error: ${e}`)
       setDownloadError(e instanceof Error ? e.message : 'Failed to start model download.')
     }
   }
 
+  // Wait for a download session to complete
+  const waitForDownload = (sessionId: string): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const poll = async () => {
+        try {
+          const response = await backendFetch(`/api/models/download/progress?sessionId=${sessionId}`)
+          if (response.ok) {
+            const progress = await response.json()
+            setDownloadProgress(progress)
+
+            if (progress.status === 'error') {
+              reject(new Error(progress.error || 'Download failed'))
+              return
+            }
+            if (progress.status === 'complete') {
+              resolve()
+              return
+            }
+          }
+          setTimeout(poll, 500)
+        } catch (e) {
+          reject(e)
+        }
+      }
+      poll()
+    })
+  }
+
   const retryInstallation = () => {
     setDownloadError(null)
     startInstallation()
   }
+
+  const shouldOfferRecommendedDownload =
+    currentStep === 'location'
+    && !readinessLoading
+    && !!readiness
+    && !readiness.can_generate
+    && readiness.suggested_models.length > 0
 
   // Handle next button
   const handleNext = async () => {
@@ -248,7 +413,11 @@ export function LaunchGate({
       return
     }
     if (currentStep === 'location') {
-      startInstallation()
+      if (shouldOfferRecommendedDownload) {
+        await startInstallation()
+      } else {
+        await handleFinish()
+      }
       return
     }
     if (currentStep === 'complete') {
@@ -271,7 +440,12 @@ export function LaunchGate({
   // Get button text
   const getNextButtonText = () => {
     if (currentStep === 'license') return licenseOnly ? 'Accept' : 'Next'
-    if (currentStep === 'location') return 'Install'
+    if (currentStep === 'location') {
+      if (shouldOfferRecommendedDownload && readiness) {
+        return `Download Recommended Models (${readiness.total_download_gb.toFixed(1)} GB)`
+      }
+      return 'Continue'
+    }
     if (currentStep === 'complete') return 'Finish'
     return 'Continue'
   }
@@ -279,6 +453,7 @@ export function LaunchGate({
   // Check if next button should be disabled
   const isNextDisabled = () => {
     if (currentStep === 'license') return !licenseAccepted || isActionPending
+    if (currentStep === 'location') return readinessLoading || isActionPending
     if (currentStep === 'complete') return isActionPending
     return false
   }
@@ -461,24 +636,68 @@ export function LaunchGate({
 
           {/* Step 2: Choose Location */}
           {currentStep === 'location' && (
-            <div style={{ animation: 'fadeIn 0.25s ease' }}>
+            <div style={{ animation: 'fadeIn 0.25s ease', display: 'flex', flexDirection: 'column', flex: 1, overflow: 'auto' }}>
               <h2 style={{
                 fontFamily: "'Miriam Libre', serif",
                 fontSize: 24,
                 fontWeight: 700,
                 marginBottom: 6
               }}>
-                Choose Location
+                {readiness?.can_generate ? 'Models Ready' : 'Choose Location'}
               </h2>
-              <p style={{ color: '#a0a0a0', fontSize: 14, marginBottom: 24 }}>
-                Select where to install the model files.
+              <p style={{ color: '#a0a0a0', fontSize: 14, marginBottom: 20 }}>
+                {readiness?.can_generate
+                  ? 'Your models are already downloaded and ready to use.'
+                  : 'Select where to store model files. You can download models from Settings after setup.'}
               </p>
 
+              {/* Existing model status */}
+              {readiness && (
+                <div style={{
+                  display: 'flex',
+                  gap: 10,
+                  marginBottom: 16,
+                  flexWrap: 'wrap'
+                }}>
+                  {[
+                    { label: 'Diffusion Model', ok: readiness.has_diffusion_model },
+                    { label: 'Text Encoder', ok: readiness.has_text_encoder },
+                    { label: 'Upscaler', ok: readiness.has_upscaler },
+                  ].map(({ label, ok }) => (
+                    <div key={label} style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '6px 12px',
+                      borderRadius: 8,
+                      background: ok ? '#0a2e1a' : '#2e1a1a',
+                      border: `1px solid ${ok ? '#1a4a2a' : '#4a1a1a'}`,
+                      fontSize: 12,
+                    }}>
+                      {ok ? (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5">
+                          <polyline points="20 6 9 17 4 12"/>
+                        </svg>
+                      ) : (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f87171" strokeWidth="2.5">
+                          <circle cx="12" cy="12" r="10"/>
+                          <line x1="15" y1="9" x2="9" y2="15"/>
+                          <line x1="9" y1="9" x2="15" y2="15"/>
+                        </svg>
+                      )}
+                      <span style={{ color: ok ? '#4ade80' : '#f87171' }}>{label}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Install location */}
               <div style={{
                 background: '#2e3445',
                 borderRadius: 12,
                 padding: '14px 18px'
               }}>
+                <div style={{ fontSize: 12, color: '#a0a0a0', marginBottom: 8 }}>Install location</div>
                 <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
                   <input
                     type="text"
@@ -489,9 +708,9 @@ export function LaunchGate({
                       background: '#1a1a1a',
                       border: '1px solid #333',
                       borderRadius: 8,
-                      padding: '12px 14px',
+                      padding: '10px 14px',
                       color: '#ffffff',
-                      fontSize: 13,
+                      fontSize: 12,
                       fontFamily: "'Consolas', 'Monaco', monospace"
                     }}
                   />
@@ -503,9 +722,9 @@ export function LaunchGate({
                       }
                     }}
                     style={{
-                      padding: '10px 28px',
+                      padding: '8px 20px',
                       borderRadius: 9999,
-                      fontSize: 13,
+                      fontSize: 12,
                       fontWeight: 600,
                       cursor: 'pointer',
                       background: 'transparent',
@@ -517,65 +736,64 @@ export function LaunchGate({
                     Browse
                   </button>
                 </div>
+              </div>
 
+              {readinessLoading && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, gap: 10 }}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" style={{ animation: 'spin 1s linear infinite' }}>
+                    <circle cx="12" cy="12" r="10" stroke="#6D28D9" strokeWidth="3" fill="none" strokeDasharray="31.4 31.4" strokeLinecap="round" />
+                  </svg>
+                  <span style={{ color: '#a0a0a0', fontSize: 13 }}>Checking models...</span>
+                </div>
+              )}
+
+              {!readinessLoading && readiness && !readiness.can_generate && (
                 <div style={{
-                  display: 'flex',
-                  justifyContent: 'flex-end',
-                  fontSize: 12,
-                  color: '#a0a0a0',
-                  marginTop: 10
+                  marginTop: 16,
+                  background: '#111827',
+                  border: '1px solid #1f2937',
+                  borderRadius: 12,
+                  padding: '14px 16px',
                 }}>
-                  <span>Available: <strong style={{ color: '#fff' }}>{availableSpace}</strong></span>
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+                    {readiness.vram_gb !== null && readiness.vram_gb < 12
+                      ? 'Recommended GGUF files for low VRAM'
+                      : 'Recommended local model files'}
+                  </div>
+                  <p style={{ color: '#9ca3af', fontSize: 12, margin: '0 0 12px 0', lineHeight: 1.5 }}>
+                    {readiness.vram_gb !== null && readiness.vram_gb < 12
+                      ? 'For 8-11 GB GPUs, use GGUF for both the Gemma text encoder and the LTX diffusion models.'
+                      : 'If you want local generation with lower memory usage, these GGUF files are the safest starting point.'}
+                  </p>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {getStartupRecommendations().map((item) => (
+                      <div
+                        key={item.title}
+                        style={{
+                          background: '#0b1220',
+                          border: '1px solid #1e293b',
+                          borderRadius: 10,
+                          padding: '10px 12px',
+                        }}
+                      >
+                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>{item.title}</div>
+                        <div style={{ color: '#e5e7eb', fontSize: 12, fontFamily: "'Consolas', 'Monaco', monospace", marginBottom: 4 }}>
+                          {item.filename}
+                        </div>
+                        <div style={{ color: '#9ca3af', fontSize: 12, marginBottom: 6 }}>{item.note}</div>
+                        <a
+                          href={item.href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: '#60a5fa', fontSize: 12, textDecoration: 'underline' }}
+                        >
+                          Open source page
+                        </a>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-
-              {/* LTX API Key - Optional but saves ~25 GB download */}
-              <div style={{
-                marginTop: 24,
-                background: '#2e3445',
-                borderRadius: 12,
-                padding: '14px 18px'
-              }}>
-                <div style={{ marginBottom: 8 }}>
-                  <label style={{ fontSize: 13, fontWeight: 600, color: '#ffffff' }}>
-                    LTX API Key
-                    <span style={{
-                      fontSize: 11,
-                      color: '#A98BD9',
-                      marginLeft: 8,
-                      fontWeight: 400
-                    }}>
-                      Optional - Saves ~25 GB download
-                    </span>
-                  </label>
-                </div>
-                <input
-                  type="password"
-                  value={ltxApiKey}
-                  onChange={(e) => setLtxApiKey(e.target.value)}
-                  placeholder="Enter API key to skip text encoder download..."
-                  style={{
-                    width: '100%',
-                    background: '#1a1a1a',
-                    border: '1px solid #333',
-                    borderRadius: 8,
-                    padding: '12px 14px',
-                    color: '#ffffff',
-                    fontSize: 13,
-                    boxSizing: 'border-box'
-                  }}
-                />
-                <p style={{ fontSize: 11, color: '#888', marginTop: 8 }}>
-                  {ltxApiKey ? (
-                    <span style={{ color: '#6D28D9' }}>
-                      ✓ Text encoder download will be skipped (using API instead)
-                    </span>
-                  ) : (
-                    'If you have an LTX API key, entering it here skips the 25 GB text encoder download. ' +
-                    'The API provides faster text encoding (~1s vs 23s local).'
-                  )}
-                </p>
-              </div>
+              )}
             </div>
           )}
 
@@ -586,7 +804,7 @@ export function LaunchGate({
               height: '100%',
               animation: 'fadeIn 0.25s ease'
             }}>
-              {/* Video Section - fills container but leaves room for progress */}
+              {/* Video Section */}
               <div style={{
                 position: 'absolute',
                 top: 0,
@@ -596,7 +814,6 @@ export function LaunchGate({
                 background: '#0a0a0a',
                 overflow: 'hidden'
               }}>
-                {/* Splash Video */}
                 <video
                   key={videoPath}
                   autoPlay
@@ -612,8 +829,6 @@ export function LaunchGate({
                 >
                   <source src={videoPath} type="video/mp4" />
                 </video>
-
-                {/* Video Credit */}
                 <div style={{
                   position: 'absolute',
                   bottom: 20,
@@ -628,7 +843,7 @@ export function LaunchGate({
                 </div>
               </div>
 
-              {/* Progress Section - fixed at bottom */}
+              {/* Progress Section */}
               <div style={{
                 position: 'absolute',
                 left: 0,
@@ -689,7 +904,6 @@ export function LaunchGate({
                 </div>
               ) : (
               <>
-                {/* Header row with status and percentage */}
                 <div style={{
                   display: 'flex',
                   justifyContent: 'space-between',
@@ -704,7 +918,6 @@ export function LaunchGate({
                   </span>
                 </div>
 
-                {/* Progress Bar */}
                 <div style={{
                   height: 6,
                   background: '#1a1a1a',
@@ -722,7 +935,6 @@ export function LaunchGate({
                   }} />
                 </div>
 
-                {/* Download stats row */}
                 <div style={{
                   display: 'flex',
                   justifyContent: 'space-between',
@@ -731,12 +943,9 @@ export function LaunchGate({
                   fontSize: 12,
                   color: '#a0a0a0'
                 }}>
-                  {/* Current file */}
                   <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {downloadProgress?.current_downloading_file || installMessage}
                   </span>
-
-                  {/* Speed and ETA */}
                   <div style={{ display: 'flex', gap: 16, marginLeft: 16, flexShrink: 0 }}>
                     {downloadProgress && downloadProgress.speed_bytes_per_sec > 0 && (
                       <span style={{ color: '#6D28D9', fontWeight: 500 }}>
@@ -756,7 +965,6 @@ export function LaunchGate({
                   </div>
                 </div>
 
-                {/* Files progress */}
                 {downloadProgress && downloadProgress.all_files.length > 0 && (
                   <div style={{
                     marginTop: 6,
@@ -783,7 +991,6 @@ export function LaunchGate({
               textAlign: 'center',
               animation: 'fadeIn 0.25s ease'
             }}>
-              {/* Success Icon */}
               <div style={{
                 width: 72,
                 height: 72,
@@ -811,7 +1018,6 @@ export function LaunchGate({
                 LTX Video is installed. Start generating.
               </p>
 
-              {/* Install Summary */}
               <div style={{
                 background: '#2e3445',
                 borderRadius: 12,
@@ -847,7 +1053,26 @@ export function LaunchGate({
           <div style={{ fontSize: 11, color: '#666' }}>© 2026 Lightricks</div>
 
           <div style={{ display: 'flex', gap: 10 }}>
-            {/* Next/Install/Finish Button */}
+            {currentStep === 'location' && shouldOfferRecommendedDownload && (
+              <button
+                onClick={() => void handleFinish()}
+                disabled={isActionPending}
+                style={{
+                  padding: '10px 18px',
+                  borderRadius: 8,
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: isActionPending ? 'not-allowed' : 'pointer',
+                  background: 'transparent',
+                  border: '1px solid #374151',
+                  color: '#d1d5db',
+                  transition: 'all 0.2s ease',
+                  opacity: isActionPending ? 0.6 : 1
+                }}
+              >
+                Continue Without Download
+              </button>
+            )}
             {currentStep !== 'installing' && (
               <button
                 onClick={() => void handleNext()}

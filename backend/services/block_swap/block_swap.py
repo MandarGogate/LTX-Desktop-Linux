@@ -79,18 +79,30 @@ class BlockSwapTransformerWrapper:
 
         Looks for common patterns in LTX/diffusers transformer architectures:
         - model.transformer_blocks (common in diffusers)
+        - model.velocity_model.transformer_blocks (LTX X0Model wrapper)
         - model.blocks (common in some architectures)
         - model.layers (fallback)
         """
         transformer = self._transformer
         blocks: list[tuple[str, Any]] = []
 
-        # Try common block container names
-        for attr_name in ("transformer_blocks", "blocks", "layers", "encoder_layers"):
-            container = getattr(transformer, attr_name, None)
-            if container is not None and hasattr(container, "__len__") and len(container) > 1:
-                for i, block in enumerate(container):
-                    blocks.append((f"{attr_name}.{i}", block))
+        # Search both the top-level module and known sub-modules
+        # LTX wraps the actual model in X0Model.velocity_model
+        search_targets: list[tuple[str, Any]] = [("<root>", transformer)]
+        for sub_name in ("velocity_model", "model", "inner_model"):
+            sub = getattr(transformer, sub_name, None)
+            if sub is not None:
+                search_targets.append((sub_name, sub))
+
+        for parent_name, parent in search_targets:
+            for attr_name in ("transformer_blocks", "blocks", "layers", "encoder_layers"):
+                container = getattr(parent, attr_name, None)
+                if container is not None and hasattr(container, "__len__") and len(container) > 1:
+                    prefix = f"{parent_name}.{attr_name}" if parent_name != "<root>" else attr_name
+                    for i, block in enumerate(container):
+                        blocks.append((f"{prefix}.{i}", block))
+                    break
+            if blocks:
                 break
 
         if not blocks:

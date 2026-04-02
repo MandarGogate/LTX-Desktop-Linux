@@ -39,28 +39,28 @@ MODEL_FILE_ORDER: tuple[ModelFileType, ...] = (
 
 DEFAULT_MODEL_DOWNLOAD_SPECS: dict[ModelFileType, ModelFileDownloadSpec] = {
     "checkpoint": ModelFileDownloadSpec(
-        relative_path=Path("ltx-2.3-22b-distilled.safetensors"),
+        relative_path=Path("diffusion_models/ltx-2.3-22b-distilled.safetensors"),
         expected_size_bytes=43_000_000_000,
         is_folder=False,
         repo_id="Lightricks/LTX-2.3",
         description="Main transformer model",
     ),
     "upsampler": ModelFileDownloadSpec(
-        relative_path=Path("ltx-2.3-spatial-upscaler-x2-1.0.safetensors"),
+        relative_path=Path("upscale_models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors"),
         expected_size_bytes=1_900_000_000,
         is_folder=False,
         repo_id="Lightricks/LTX-2.3",
         description="2x Upscaler",
     ),
     "distilled_lora": ModelFileDownloadSpec(
-        relative_path=Path("ltx-2-19b-distilled-lora-384.safetensors"),
+        relative_path=Path("loras/ltx-2.3-22b-distilled-lora-384.safetensors"),
         expected_size_bytes=400_000_000,
         is_folder=False,
-        repo_id="Lightricks/LTX-2",
-        description="LoRA for Pro model",
+        repo_id="Lightricks/LTX-2.3",
+        description="Distilled LoRA for Balanced mode",
     ),
     "ic_lora": ModelFileDownloadSpec(
-        relative_path=Path("ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"),
+        relative_path=Path("loras/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"),
         expected_size_bytes=654_465_352,
         is_folder=False,
         repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
@@ -88,7 +88,7 @@ DEFAULT_MODEL_DOWNLOAD_SPECS: dict[ModelFileType, ModelFileDownloadSpec] = {
         description="DW Pose TorchScript processor",
     ),
     "text_encoder": ModelFileDownloadSpec(
-        relative_path=Path("gemma-3-12b-it-qat-q4_0-unquantized"),
+        relative_path=Path("text_encoders/gemma-3-12b-it-qat-q4_0-unquantized"),
         expected_size_bytes=25_000_000_000,
         is_folder=True,
         repo_id="Lightricks/gemma-3-12b-it-qat-q4_0-unquantized",
@@ -102,17 +102,17 @@ DEFAULT_MODEL_DOWNLOAD_SPECS: dict[ModelFileType, ModelFileDownloadSpec] = {
         description="Z-Image-Turbo model for text-to-image generation",
     ),
     "gguf_checkpoint": ModelFileDownloadSpec(
-        relative_path=Path("gguf/LTX-2.3-Q8_0.gguf"),
-        expected_size_bytes=12_000_000_000,
+        relative_path=Path("diffusion_models/ltx-2.3-22b-dev-Q8_0.gguf"),
+        expected_size_bytes=22_800_000_000,
         is_folder=False,
         repo_id="unsloth/LTX-2.3-GGUF",
-        description="GGUF quantized transformer (Q8_0, ~12GB, for low-VRAM GPUs)",
+        description="GGUF quantized transformer (Q8_0, ~22.8GB, for low-VRAM GPUs)",
     ),
 }
 
 
 DEFAULT_REQUIRED_MODEL_TYPES: frozenset[ModelFileType] = frozenset(
-    {"checkpoint", "upsampler", "zit"}
+    {"checkpoint", "upsampler"}
 )
 
 
@@ -123,13 +123,19 @@ def _normalized_relative_path(
     """Validate and normalize relative_path from specs — pure function."""
     relative_path = specs[model_type].relative_path
     if relative_path.is_absolute():
-        raise ValueError(f"Model path for {model_type} must be relative: {relative_path}")
+        raise ValueError(
+            f"Model path for {model_type} must be relative: {relative_path}"
+        )
 
     normalized_parts = [part for part in relative_path.parts if part not in ("", ".")]
     if not normalized_parts:
-        raise ValueError(f"Model path for {model_type} cannot be empty: {relative_path}")
+        raise ValueError(
+            f"Model path for {model_type} cannot be empty: {relative_path}"
+        )
     if ".." in normalized_parts:
-        raise ValueError(f"Model path for {model_type} cannot traverse parents: {relative_path}")
+        raise ValueError(
+            f"Model path for {model_type} cannot traverse parents: {relative_path}"
+        )
 
     return Path(*normalized_parts)
 
@@ -151,7 +157,9 @@ def resolve_downloading_target_path(
     specs: Mapping[ModelFileType, ModelFileDownloadSpec],
     model_type: ModelFileType,
 ) -> Path:
-    return resolve_downloading_dir(models_dir) / _normalized_relative_path(specs, model_type)
+    return resolve_downloading_dir(models_dir) / _normalized_relative_path(
+        specs, model_type
+    )
 
 
 def resolve_downloading_path(

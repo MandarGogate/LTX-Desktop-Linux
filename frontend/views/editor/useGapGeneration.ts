@@ -4,7 +4,10 @@ import { DEFAULT_COLOR_CORRECTION } from '../../types/project'
 import type { GenerationSettings } from '../../components/SettingsPanel'
 import { copyToAssetFolder } from '../../lib/asset-copy'
 import { backendFetch } from '../../lib/backend'
+import { loadGenerationSettings, saveGenerationSettings } from '../../lib/generation-settings-storage'
 import { fileUrlToPath } from '../../lib/url-to-path'
+
+const GAP_SETTINGS_STORAGE_KEY = 'ltx_editor_gap_generation_settings'
 
 export interface UseGapGenerationParams {
   clips: TimelineClip[]
@@ -57,7 +60,7 @@ export function useGapGeneration({
   const gapGenerateModeRef = useRef(gapGenerateMode)
   gapGenerateModeRef.current = gapGenerateMode
   const [gapPrompt, setGapPrompt] = useState('')
-  const [gapSettings, setGapSettings] = useState<GenerationSettings>({
+  const [gapSettings, setGapSettings] = useState<GenerationSettings>(() => loadGenerationSettings(GAP_SETTINGS_STORAGE_KEY, {
     model: 'fast',
     duration: 5,
     videoResolution: '540p',
@@ -67,7 +70,7 @@ export function useGapGeneration({
     imageResolution: '1080p',
     imageAspectRatio: '16:9',
     imageSteps: 30,
-  })
+  }))
   const [gapImageFile, setGapImageFile] = useState<File | null>(null)
   const gapImageInputRef = useRef<HTMLInputElement>(null)
   const [gapApplyAudioToTrack, setGapApplyAudioToTrack] = useState(true)
@@ -77,6 +80,10 @@ export function useGapGeneration({
       setGapImageFile(null)
     }
   }, [gapGenerateMode, gapImageFile])
+
+  useEffect(() => {
+    saveGenerationSettings(GAP_SETTINGS_STORAGE_KEY, gapSettings)
+  }, [gapSettings])
 
   // Tracks the gap currently being generated in the background (after modal closes)
   const [generatingGap, setGeneratingGap] = useState<{

@@ -4,6 +4,8 @@ import os
 import sys
 from typing import Any, cast
 
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
 if os.environ.get("BACKEND_DEBUG") == "1":
     try:
         import debugpy  # type: ignore[reportMissingImports]
@@ -45,6 +47,18 @@ logging.basicConfig(level=logging.INFO, handlers=[console_handler])
 logger = logging.getLogger(__name__)
 
 
+def _is_known_harmless_uninitialized_name(name: object) -> bool:
+    if not isinstance(name, str):
+        return False
+    return (
+        name == "vision_tower"
+        or name.startswith("vision_model.")
+        or name.startswith("model.vision_tower.")
+        or name.startswith("model.model.vision_tower.")
+        or ".vision_tower." in name
+    )
+
+
 class _ExpectedUninitializedWeightsFilter(logging.Filter):
     """Suppress only known-harmless missing-weight warnings.
 
@@ -71,10 +85,7 @@ class _ExpectedUninitializedWeightsFilter(logging.Filter):
         if not isinstance(missing, list) or not missing:
             return True
 
-        return not all(
-            isinstance(name, str) and ("vision_tower" in name or name.startswith("vision_model."))
-            for name in missing
-        )
+        return not all(_is_known_harmless_uninitialized_name(name) for name in missing)
 
 
 logging.getLogger("ltx_core.loader.single_gpu_model_builder").addFilter(
@@ -145,10 +156,12 @@ if use_sage_attention:
                         exc_info=True,
                     )
                     _sageattention_runtime_fallback_logged = True
+                # Cast to common dtype to avoid dtype mismatch errors
+                common_dtype = query.dtype
                 return _original_sdpa(
                     query,
-                    key,
-                    value,
+                    key.to(common_dtype),
+                    value.to(common_dtype),
                     attn_mask=attn_mask,
                     dropout_p=dropout_p,
                     is_causal=is_causal,

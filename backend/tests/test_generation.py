@@ -144,6 +144,19 @@ class TestGenerate:
         pipeline = fake_services.fast_video_pipeline
         assert pipeline.generate_calls[0]["seed"] == 123
 
+    def test_negative_prompt_is_forwarded_to_pipeline(self, client, test_state, fake_services, create_fake_model_files):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "negativePrompt": "low quality, artifacts"},
+        )
+        assert r.status_code == 200
+
+        pipeline = fake_services.fast_video_pipeline
+        assert pipeline.generate_calls[0]["negative_prompt"] == "low quality, artifacts"
+
     def test_error_sets_generation_error(self, client, test_state, fake_services, create_fake_model_files):
         create_fake_model_files()
         _enable_local_text_encoding(test_state)

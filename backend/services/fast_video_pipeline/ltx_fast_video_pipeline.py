@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 import os
 from typing import Final, cast
 
@@ -22,23 +22,60 @@ class LTXFastVideoPipeline:
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
+        *,
+        lora_path: str | None = None,
+        lora_strength: float = 1.0,
+        extra_loras: list[tuple[str, float]] | None = None,
     ) -> "LTXFastVideoPipeline":
         return LTXFastVideoPipeline(
             checkpoint_path=checkpoint_path,
             gemma_root=gemma_root,
             upsampler_path=upsampler_path,
             device=device,
+            lora_path=lora_path,
+            lora_strength=lora_strength,
+            extra_loras=extra_loras,
         )
 
-    def __init__(self, checkpoint_path: str, gemma_root: str | None, upsampler_path: str, device: torch.device) -> None:
+    def __init__(
+        self,
+        checkpoint_path: str,
+        gemma_root: str | None,
+        upsampler_path: str,
+        device: torch.device,
+        *,
+        lora_path: str | None = None,
+        lora_strength: float = 1.0,
+        extra_loras: list[tuple[str, float]] | None = None,
+    ) -> None:
+        from ltx_core.loader.primitives import LoraPathStrengthAndSDOps
+        from ltx_core.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
         from ltx_core.quantization import QuantizationPolicy
         from ltx_pipelines.distilled import DistilledPipeline
+
+        loras = []
+        if lora_path:
+            loras.append(
+                LoraPathStrengthAndSDOps(
+                    path=lora_path,
+                    strength=lora_strength,
+                    sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+                )
+            )
+        for extra_path, extra_strength in extra_loras or []:
+            loras.append(
+                LoraPathStrengthAndSDOps(
+                    path=extra_path,
+                    strength=extra_strength,
+                    sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+                )
+            )
 
         self.pipeline = DistilledPipeline(
             distilled_checkpoint_path=checkpoint_path,
             gemma_root=cast(str, gemma_root),
             spatial_upsampler_path=upsampler_path,
-            loras=[],
+            loras=loras,
             device=device,
             quantization=QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None,
         )
@@ -78,7 +115,10 @@ class LTXFastVideoPipeline:
         frame_rate: float,
         images: list[ImageConditioningInput],
         output_path: str,
+        progress_callback: "Callable[[int, int], None] | None" = None,
+        negative_prompt: str = "",
     ) -> None:
+        del negative_prompt
         tiling_config = default_tiling_config()
         video, audio = self._run_inference(
             prompt=prompt,

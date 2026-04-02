@@ -125,7 +125,9 @@ class GpuInfoImpl:
                     _CudaDeviceProperties,
                     torch.cuda.get_device_properties(0),  # type: ignore[reportUnknownMemberType]
                 )
-                return int(properties.total_memory // (1024**3))
+                # Use ceiling division so 24 GB cards that report slightly under
+                # 24 GiB (e.g. RTX 4090) still classify as 24 GB / HIGH tier.
+                return int((properties.total_memory + (1024**3 - 1)) // (1024**3))
             except Exception:
                 logger.warning("Failed to query CUDA total VRAM", exc_info=True)
                 return None

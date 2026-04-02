@@ -79,6 +79,17 @@ class TestGGUFModelDiscovery:
         assert result is not None
         assert result.name == "some-model.gguf"
 
+    def test_ignores_zimage_gguf_when_selecting_video_model(self, tmp_path: Path) -> None:
+        gguf_dir = tmp_path / "gguf"
+        gguf_dir.mkdir()
+        (gguf_dir / "z-image-turbo-BF16.gguf").write_bytes(b"\x00" * 100)
+        (gguf_dir / "ltx-2.3-22b-dev-Q8_0.gguf").write_bytes(b"\x00" * 100)
+
+        loader = GGUFModelLoader(tmp_path)
+        result = loader.find_gguf_model("Q8_0")
+        assert result is not None
+        assert result.name == "ltx-2.3-22b-dev-Q8_0.gguf"
+
 
 class TestGGUFInfo:
     def test_info_empty_when_no_files(self, tmp_path: Path) -> None:

@@ -74,5 +74,11 @@ backend/generated/
 release/
 python-embed/
 
+# Web app scripts
+run-web.sh
+stop-web.sh
+restart-web.sh
+install.sh
+
 # Downloaded during CI for Windows NSIS installer
 resources/vc_redist.x64.exe

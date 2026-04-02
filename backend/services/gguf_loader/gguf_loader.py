@@ -70,7 +70,14 @@ class GGUFModelLoader:
 
     def __init__(self, models_dir: Path) -> None:
         self.models_dir = models_dir
-        self._gguf_dir = models_dir / "gguf"
+        self._diffusion_dir = models_dir / "diffusion_models"
+        # Legacy gguf/ dir for backward compat scanning
+        self._legacy_gguf_dir = models_dir / "gguf"
+
+    @staticmethod
+    def _is_video_model_gguf(gguf_path: Path) -> bool:
+        name = gguf_path.name.lower()
+        return "z-image" not in name and "zimage" not in name
 
     def find_gguf_model(self, preferred_quant: str = "Q8_0") -> Path | None:
         """Find a GGUF model file, preferring the specified quantization.
@@ -83,7 +90,7 @@ class GGUFModelLoader:
             if q not in search_order:
                 search_order.append(q)
 
-        search_dirs = [self._gguf_dir, self.models_dir]
+        search_dirs = [self._diffusion_dir, self._legacy_gguf_dir, self.models_dir]
 
         for quant in search_order:
             for search_dir in search_dirs:
@@ -91,13 +98,17 @@ class GGUFModelLoader:
                     continue
                 # Search recursively for GGUF files matching this quant
                 for gguf_file in search_dir.rglob(f"*{quant}*.gguf"):
+                    if not self._is_video_model_gguf(gguf_file):
+                        continue
                     return gguf_file
 
         # Fallback: any .gguf file
-        for search_dir in search_dirs:
+        for search_dir in [self._diffusion_dir, self._legacy_gguf_dir, self.models_dir]:
             if not search_dir.exists():
                 continue
             for gguf_file in search_dir.rglob("*.gguf"):
+                if not self._is_video_model_gguf(gguf_file):
+                    continue
                 return gguf_file
 
         return None
@@ -214,7 +225,7 @@ class GGUFModelLoader:
         """Return info about available GGUF models for API responses."""
         available: list[dict[str, object]] = []
 
-        search_dirs = [self._gguf_dir, self.models_dir]
+        search_dirs = [self._diffusion_dir, self._legacy_gguf_dir, self.models_dir]
         seen: set[str] = set()
 
         for search_dir in search_dirs:
@@ -240,6 +251,6 @@ class GGUFModelLoader:
 
         return {
             "available_models": available,
-            "gguf_dir": str(self._gguf_dir),
+            "diffusion_dir": str(self._diffusion_dir),
             "models_dir": str(self.models_dir),
         }

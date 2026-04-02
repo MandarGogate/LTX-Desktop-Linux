@@ -19,7 +19,10 @@ function getBaseUrl(): string {
 }
 
 async function webFetch(path: string, init?: RequestInit): Promise<Response> {
-  return fetch(`${getBaseUrl()}${path}`, init)
+  const headers = new Headers(init?.headers)
+  const token = localStorage.getItem('ltx_auth_token') || ''
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  return fetch(`${getBaseUrl()}${path}`, { ...init, headers })
 }
 
 /**
@@ -32,6 +35,20 @@ const webElectronAPI = {
     url: getBaseUrl(),
     token: localStorage.getItem('ltx_auth_token') || '',
   }),
+
+  // ---- Python backend lifecycle (no-op in web mode — backend already running) ----
+  checkPythonReady: async () => ({ ready: true }),
+  startPythonBackend: async () => ({ success: true }),
+  onBackendProcessStatus: (_callback: any) => () => {},
+  getBackendProcessStatus: async () => ({ status: 'alive' }),
+
+  // ---- Analytics (stored in localStorage in web mode) ----
+  getAnalyticsState: async () => ({
+    analyticsEnabled: localStorage.getItem('ltx_analytics') === 'true',
+  }),
+  setAnalyticsEnabled: async (enabled: boolean) => {
+    localStorage.setItem('ltx_analytics', String(enabled))
+  },
 
   // ---- File operations ----
   readLocalFile: async (filePath: string) => {
@@ -120,13 +137,21 @@ const webElectronAPI = {
 
   // ---- Project assets ----
   copyToProjectAssets: async (
-    _srcPath: string,
-    _projectId: string,
-  ) => ({
-    success: false,
-    error: 'Not supported in web mode — use upload instead',
-  }),
-  getProjectAssetsPath: async () => '',
+    srcPath: string,
+    projectId: string,
+  ) => {
+    const resp = await webFetch('/web/project-assets/copy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ srcPath, projectId }),
+    })
+    return resp.json()
+  },
+  getProjectAssetsPath: async () => {
+    const resp = await webFetch('/web/project-assets/path')
+    const data = await resp.json()
+    return data.path || ''
+  },
   openProjectAssetsPathChangeDialog: async () => ({
     success: false,
     error: 'Not supported in web mode',
@@ -164,6 +189,51 @@ const webElectronAPI = {
   onSettingsChanged: (_callback: any) => () => {},
   onNavigate: (_callback: any) => () => {},
   onProjectChanged: (_callback: any) => () => {},
+
+  // ---- Backend health (web mode — backend is already running) ----
+  onBackendHealthStatus: (callback: any) => {
+    // Immediately report alive, then poll /health for ongoing status
+    setTimeout(() => callback({ status: 'alive' }), 100)
+
+    const poll = async () => {
+      try {
+        const resp = await webFetch('/health')
+        if (resp.ok) {
+          callback({ status: 'alive' })
+        }
+      } catch {
+        // Backend might be starting up — keep polling
+      }
+    }
+    const intervalId = window.setInterval(poll, 5000)
+    return () => clearInterval(intervalId)
+  },
+
+  getBackendHealthStatus: async () => {
+    try {
+      const resp = await webFetch('/health')
+      if (resp.ok) return { status: 'alive' }
+    } catch {
+      // ignore
+    }
+    return { status: 'alive' }  // Assume alive in web mode
+  },
+
+  // ---- Video frame extraction ----
+  extractVideoFrame: async (
+    videoPath: string,
+    timeSeconds: number,
+    width: number,
+    _fps: number,
+  ): Promise<string> => {
+    const resp = await webFetch('/web/extract-frame', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_path: videoPath, time_seconds: timeSeconds, width }),
+    })
+    const data = await resp.json()
+    return data.frame
+  },
 }
 
 // ---- Auto-install shim if not in Electron ----

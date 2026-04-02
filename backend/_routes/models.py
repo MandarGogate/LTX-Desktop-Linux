@@ -11,6 +11,7 @@ from api_types import (
     ModelDownloadRequest,
     ModelDownloadStartResponse,
     ModelInfo,
+    ModelReadinessResponse,
     ModelsStatusResponse,
     RequiredModelsResponse,
     TextEncoderDownloadResponse,
@@ -32,6 +33,22 @@ def route_models_list(handler: AppHandler = Depends(get_state_service)) -> list[
 @router.get("/models/status", response_model=ModelsStatusResponse)
 def route_models_status(handler: AppHandler = Depends(get_state_service)) -> ModelsStatusResponse:
     return handler.models.get_models_status()
+
+
+@router.get("/models/readiness", response_model=ModelReadinessResponse)
+def route_models_readiness(handler: AppHandler = Depends(get_state_service)) -> ModelReadinessResponse:
+    """Check if the app has enough models to generate and suggest downloads."""
+    import torch
+
+    vram_gb: int | None = None
+    gpu_name: str | None = None
+    if torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(0)  # type: ignore[reportUnknownMemberType]
+        total_bytes = int(props.total_memory)  # type: ignore[reportUnknownMemberType]
+        vram_gb = int((total_bytes + (1024**3 - 1)) // (1024**3))
+        gpu_name = str(props.name)  # type: ignore[reportUnknownMemberType]
+
+    return handler.models.get_model_readiness(vram_gb=vram_gb, gpu_name=gpu_name)
 
 
 @router.get("/models/download/progress", response_model=DownloadProgressResponse)

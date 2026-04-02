@@ -13,5 +13,11 @@
     "steps": 20,
     "use_upscaler": true
   },
-  "prompt_cache_size": 100
+  "prompt_cache_size": 100,
+  "project_assets_dir": "",
+  "preferred_model_path": "",
+  "selected_loras": [],
+  "preferred_gguf_path": "",
+  "preferred_lora_path": "",
+  "preferred_lora_strength": 0.8
 }

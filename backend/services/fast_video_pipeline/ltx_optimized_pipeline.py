@@ -28,7 +28,58 @@ logger = logging.getLogger(__name__)
 
 
 def _make_dev_sigmas(steps: int) -> list[float]:
-    return [float(1.0 - i / steps) for i in range(steps + 1)]
+    """Create the correct sigma schedule for the non-distilled (dev) model.
+
+    Uses LTX2Scheduler which applies token-count-dependent shifting and
+    stretching. A simple linear schedule produces noise with dev models.
+    """
+    from ltx_pipelines.ti2vid_one_stage import LTX2Scheduler
+    scheduler = LTX2Scheduler()
+    sigmas = scheduler.execute(steps=steps)
+    return sigmas.tolist()
+
+
+def _get_official_dev_guidance_defaults() -> tuple[str, Any, Any]:
+    from ltx_core.components.guiders import MultiModalGuiderParams
+
+    try:
+        from ltx_pipelines.utils.constants import DEFAULT_NEGATIVE_PROMPT, LTX_2_3_PARAMS
+
+        return (
+            DEFAULT_NEGATIVE_PROMPT,
+            LTX_2_3_PARAMS.video_guider_params,
+            LTX_2_3_PARAMS.audio_guider_params,
+        )
+    except Exception:
+        return (
+            "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, "
+            "grainy texture, poor lighting, flickering, motion blur, distorted proportions, unnatural skin tones, "
+            "deformed facial features, asymmetrical face, missing facial features, extra limbs, disfigured hands, "
+            "wrong hand count, artifacts around text, inconsistent perspective, camera shake, incorrect depth of "
+            "field, background too sharp, background clutter, distracting reflections, harsh shadows, inconsistent "
+            "lighting direction, color banding, cartoonish rendering, 3D CGI look, unrealistic materials, uncanny "
+            "valley effect, incorrect ethnicity, wrong gender, exaggerated expressions, wrong gaze direction, "
+            "mismatched lip sync, silent or muted audio, distorted voice, robotic voice, echo, background noise, "
+            "off-sync audio, incorrect dialogue, added dialogue, repetitive speech, jittery movement, awkward "
+            "pauses, incorrect timing, unnatural transitions, inconsistent framing, tilted camera, flat lighting, "
+            "inconsistent tone, cinematic oversaturation, stylized filters, or AI artifacts.",
+            MultiModalGuiderParams(
+                cfg_scale=3.0,
+                stg_scale=1.0,
+                rescale_scale=0.7,
+                modality_scale=3.0,
+                skip_step=0,
+                stg_blocks=[28],
+            ),
+            MultiModalGuiderParams(
+                cfg_scale=7.0,
+                stg_scale=1.0,
+                rescale_scale=0.7,
+                modality_scale=3.0,
+                skip_step=0,
+                stg_blocks=[28],
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +210,7 @@ class LTXOptimizedPipeline:
         self.vram_manager = vram_manager
         self._use_gguf = gguf_path is not None and Path(gguf_path).exists()
         self._block_swap_wrapper: Any = None
+        self._te_block_swap_wrapper: Any = None
 
         # Cached model references
         self._cached_text_encoder: Any = None
@@ -196,10 +248,12 @@ class LTXOptimizedPipeline:
         from services.services_utils import device_supports_fp8
 
         quantization = None
-        if device_supports_fp8(self.device):
+        if device_supports_fp8(self.device) and not self._use_gguf:
             from ltx_core.quantization import QuantizationPolicy
             quantization = QuantizationPolicy.fp8_cast()
             logger.info("FP8 quantization enabled")
+        elif self._use_gguf:
+            logger.info("Skipping FP8 quantization for GGUF transformer")
 
         # Use StateDictRegistry for caching across builders
         registry = StateDictRegistry()
@@ -244,8 +298,25 @@ class LTXOptimizedPipeline:
                         "_default_text_encoder_builder",
                         self.model_ledger.text_encoder_builder,
                     )
+                variant_model_path: tuple[str, ...]
+                variant_path_obj = Path(variant_path)
+                if variant_path_obj.is_dir():
+                    shard_paths = sorted(str(path) for path in variant_path_obj.glob("model-*.safetensors"))
+                    if not shard_paths:
+                        raise ValueError(
+                            f"Text encoder variant directory contains no model shards: {variant_path}"
+                        )
+                    variant_model_path = (str(self._checkpoint_path), *shard_paths)
+                    logger.info(
+                        "Using sharded text encoder variant directory: %s (%d shards)",
+                        variant_path,
+                        len(shard_paths),
+                    )
+                else:
+                    variant_model_path = (str(self._checkpoint_path), variant_path)
+
                 self.model_ledger.text_encoder_builder = Builder(
-                    model_path=(str(self._checkpoint_path), variant_path),
+                    model_path=variant_model_path,
                     model_class_configurator=GemmaTextEncoderConfigurator,
                     model_sd_ops=AV_GEMMA_TEXT_ENCODER_KEY_OPS,
                     registry=DummyRegistry(),
@@ -260,6 +331,8 @@ class LTXOptimizedPipeline:
         # Pre-load GGUF state dict (lazy — stays quantized)
         if self._use_gguf and self._gguf_path:
             self._preload_gguf()
+        else:
+            self._gguf_state_dict = None
 
     def _preload_gguf(self) -> None:
         """Load GGUF with parallel dequantization (threaded, ~2-3x faster)."""
@@ -351,11 +424,27 @@ class LTXOptimizedPipeline:
         # meta tensors with actual data without shape mismatch errors)
         meta_model.load_state_dict(self._gguf_state_dict, strict=False, assign=True)
 
+        # Cast all non-GGUF parameters (norms, biases, embeddings) to the
+        # pipeline compute dtype to prevent mixed-dtype attention errors.
+        from services.gguf_loader.gguf_lazy_loader import GGUFParameter as _GGUFParam
+        for param in meta_model.parameters():
+            if isinstance(param, _GGUFParam):
+                continue  # Skip quantized GGUF weights
+            if param.dtype != self.dtype and param.dtype.is_floating_point:
+                param.data = param.data.to(self.dtype)
+        for buf in meta_model.buffers():
+            if buf.dtype.is_floating_point and buf.dtype != self.dtype:
+                buf.data = buf.data.to(self.dtype)
+
+        # Free the GGUF state dict from RAM — weights are now in the model
+        self._gguf_state_dict = None
+        gc.collect()
+
         # Move to CPU and wrap in X0Model
         from ltx_core.model.transformer import X0Model
         transformer = X0Model(meta_model).eval()
 
-        logger.info("GGUF transformer loaded in %.2fs (skeleton + assign)", time.perf_counter() - t0)
+        logger.info("GGUF transformer loaded in %.2fs (skeleton + assign), freed GGUF cache", time.perf_counter() - t0)
         return transformer
 
     # ------------------------------------------------------------------
@@ -463,6 +552,11 @@ class LTXOptimizedPipeline:
     # ------------------------------------------------------------------
 
     def _setup_block_swap(self, transformer: Any) -> Any:
+        """Wrap transformer with block swap.
+
+        Reuses the existing wrapper if available to avoid accumulating
+        duplicate forward hooks on every generation call.
+        """
         from services.block_swap.fast_block_swap import FastBlockSwapWrapper
         from services.vram_manager.vram_manager import OffloadStrategy
 
@@ -470,6 +564,12 @@ class LTXOptimizedPipeline:
             OffloadStrategy.BLOCK_SWAP,
             OffloadStrategy.BLOCK_SWAP_AGGRESSIVE,
         ):
+            return transformer
+
+        # Reuse existing wrapper — hooks are already installed on the modules
+        if self._block_swap_wrapper is not None:
+            self._block_swap_wrapper.restore_gpu_blocks()
+            logger.info("Reusing existing block swap wrapper")
             return transformer
 
         blocks_on_gpu = self.vram_manager.block_swap_keep_on_gpu
@@ -507,8 +607,8 @@ class LTXOptimizedPipeline:
 
             def _make_upcast_forward(lin: _torch.nn.Linear) -> Any:
                 def _fwd(x: _torch.Tensor, **kw: Any) -> _torch.Tensor:
-                    w = lin.weight.to(x.dtype)
-                    b = lin.bias.to(x.dtype) if lin.bias is not None else None
+                    w = lin.weight.to(device=x.device, dtype=x.dtype)
+                    b = lin.bias.to(device=x.device, dtype=x.dtype) if lin.bias is not None else None
                     return _torch.nn.functional.linear(x, w, b)
                 return _fwd
 
@@ -517,6 +617,22 @@ class LTXOptimizedPipeline:
         logger.info("Quantized %d Linear layers to FP8 in text encoder", count)
 
     def _setup_text_encoder_block_swap(self, text_encoder: Any) -> Any:
+        """Apply block swap to Gemma language model layers.
+
+        Reuses the existing wrapper if available to avoid accumulating
+        duplicate forward hooks on every generation call.
+        """
+        if self._te_block_swap_wrapper is not None:
+            self._te_block_swap_wrapper.restore_gpu_blocks()
+            logger.info("Reusing existing text encoder block swap wrapper")
+            return self._te_block_swap_wrapper
+
+        wrapper = self._create_text_encoder_block_swap(text_encoder)
+        if wrapper is not None:
+            self._te_block_swap_wrapper = wrapper
+        return wrapper
+
+    def _create_text_encoder_block_swap(self, text_encoder: Any) -> Any:
         from services.block_swap.fast_block_swap import FastBlockSwapWrapper
         from services.vram_manager.vram_manager import VRAMTier
 
@@ -540,13 +656,20 @@ class LTXOptimizedPipeline:
 
         match self.vram_manager.tier:
             case VRAMTier.HIGH:
-                keep = len(layers)
+                keep = 6
             case VRAMTier.MEDIUM:
-                keep = 8
-            case VRAMTier.LOW:
                 keep = 4
-            case _:
+            case VRAMTier.LOW:
                 keep = 3
+            case _:
+                keep = 2
+
+        # Tighten if VRAM is low
+        free_vram_mb = self.vram_manager.get_free_vram_mb()
+        if free_vram_mb < 10_000:
+            keep = min(keep, 3)
+        if free_vram_mb < 6_000:
+            keep = min(keep, 2)
 
         if keep >= len(layers):
             return None
@@ -578,7 +701,7 @@ class LTXOptimizedPipeline:
                 buf.data = buf.data.to(self.device)
         lm_head = getattr(gemma_model, "lm_head", None)
         if lm_head is not None:
-            lm_head.to(self.device)
+            lm_head.to("cpu")
         inner_model = getattr(gemma_model, "model", None)
         if inner_model is not None:
             for child_name, child in inner_model.named_children():
@@ -618,6 +741,24 @@ class LTXOptimizedPipeline:
                     child.to(self.device)
 
     # ------------------------------------------------------------------
+    # Distilled mode detection
+    # ------------------------------------------------------------------
+
+    def _is_distilled_mode(self) -> bool:
+        """Return True if the configuration uses distilled denoising (no CFG needed)."""
+        is_distilled = "distilled" in self._checkpoint_path.lower()
+        if self._gguf_path and "distilled" in self._gguf_path.lower():
+            is_distilled = True
+        if self._lora_path and "distilled" in self._lora_path.lower():
+            is_distilled = True
+        if self._gguf_path and "dev" in self._gguf_path.lower():
+            if self._lora_path and "distilled" in self._lora_path.lower():
+                is_distilled = True
+            else:
+                is_distilled = False
+        return is_distilled
+
+    # ------------------------------------------------------------------
     # Sigma schedule
     # ------------------------------------------------------------------
 
@@ -631,7 +772,12 @@ class LTXOptimizedPipeline:
                 is_distilled = True
             else:
                 is_distilled = False
-        if is_distilled and self._num_inference_steps is None:
+        if is_distilled:
+            # Distilled models MUST use the distilled sigma schedule. Using a
+            # linear dev schedule with a distilled model produces noise. The
+            # number of steps is fixed by the distilled training and cannot be
+            # overridden by the user's step-count setting.
+            logger.info("Using %d-step distilled sigma schedule", len(DISTILLED_SIGMA_VALUES) - 1)
             return list(DISTILLED_SIGMA_VALUES)
         steps = self._num_inference_steps or 20
         return _make_dev_sigmas(steps)
@@ -676,6 +822,7 @@ class LTXOptimizedPipeline:
         images: list[Any],
         output_path: str,
         progress_callback: Any = None,
+        negative_prompt: str = "",
     ) -> None:
         import torch
         with torch.inference_mode():
@@ -683,6 +830,7 @@ class LTXOptimizedPipeline:
                 prompt=prompt, seed=seed, height=height, width=width,
                 num_frames=num_frames, frame_rate=frame_rate, images=images,
                 output_path=output_path, progress_callback=progress_callback,
+                negative_prompt=negative_prompt,
             )
 
     def _generate_impl(
@@ -696,6 +844,7 @@ class LTXOptimizedPipeline:
         images: list[Any],
         output_path: str,
         progress_callback: Any = None,
+        negative_prompt: str = "",
     ) -> None:
         import torch
 
@@ -709,8 +858,10 @@ class LTXOptimizedPipeline:
         from ltx_pipelines.utils.helpers import (
             denoise_audio_video,
             image_conditionings_by_replacing_latent,
+            multi_modal_guider_factory_denoising_func,
             simple_denoising_func,
         )
+        from ltx_core.components.guiders import MultiModalGuiderFactory, MultiModalGuiderParams
         from ltx_pipelines.utils.samplers import euler_denoising_loop
 
         from services.ltx_pipeline_common import encode_video_output, video_chunks_number
@@ -725,9 +876,18 @@ class LTXOptimizedPipeline:
         t1 = time.perf_counter()
         cache_key = prompt.strip()
         cached = self._prompt_cache.get(cache_key)
+        neg_video_context = None
+        neg_audio_context = None
+        dev_negative_prompt, video_guider_defaults, audio_guider_defaults = _get_official_dev_guidance_defaults()
         if cached is not None:
             video_context, audio_context = cached
             video_context, audio_context = self._normalize_text_contexts(video_context, audio_context)
+            # Also check for cached negative prompt
+            resolved_negative_prompt = negative_prompt.strip() or dev_negative_prompt
+            neg_cached = self._prompt_cache.get(f"__neg__::{resolved_negative_prompt}")
+            if neg_cached is not None:
+                neg_video_context, neg_audio_context = neg_cached
+                neg_video_context, neg_audio_context = self._normalize_text_contexts(neg_video_context, neg_audio_context)
             logger.info("[optimized] Phase 1 (text encode): CACHED %.4fs", time.perf_counter() - t1)
         else:
             if self._cached_text_encoder is None:
@@ -748,14 +908,39 @@ class LTXOptimizedPipeline:
             gemma = getattr(text_encoder, "model", None)
             if gemma is not None:
                 _device = self.device
-                class _DeviceOverride(type(gemma)):  # type: ignore[misc]
-                    @property
-                    def device(self_inner: Any) -> Any:  # type: ignore[override]
-                        return _device
-                gemma.__class__ = _DeviceOverride  # type: ignore[assignment]
+                if not getattr(gemma, "_device_override_applied", False):
+                    class _DeviceOverride(type(gemma)):  # type: ignore[misc]
+                        @property
+                        def device(self_inner: Any) -> Any:  # type: ignore[override]
+                            return _device
+                    gemma.__class__ = _DeviceOverride  # type: ignore[assignment]
+                    gemma._device_override_applied = True  # type: ignore[attr-defined]
 
             context_p = encode_text(text_encoder, prompts=[prompt])[0]
             video_context, audio_context = self._normalize_text_contexts(*context_p)
+
+            # Dev (non-distilled) models need CFG — encode negative prompt
+            use_cfg = not self._is_distilled_mode()
+            neg_video_context = None
+            neg_audio_context = None
+            if use_cfg:
+                resolved_negative_prompt = negative_prompt.strip() or dev_negative_prompt
+                neg_cache_key = f"__neg__::{resolved_negative_prompt}"
+                neg_context_p = encode_text(text_encoder, prompts=[resolved_negative_prompt])[0]
+                neg_video_context, neg_audio_context = self._normalize_text_contexts(*neg_context_p)
+                # Cache negative embeddings
+                self._cache_prompt_embedding(
+                    neg_cache_key,
+                    neg_video_context.detach().cpu(),
+                    neg_audio_context.detach().cpu() if neg_audio_context is not None else None,
+                )
+                logger.info(
+                    "[optimized] Dev mode: encoded official negative prompt for CFG/STG "
+                    "(cfg=%.2f stg=%.2f stg_blocks=%s)",
+                    video_guider_defaults.cfg_scale,
+                    video_guider_defaults.stg_scale,
+                    list(video_guider_defaults.stg_blocks),
+                )
 
             # Cache the result on CPU for reuse
             self._cache_prompt_embedding(
@@ -812,15 +997,33 @@ class LTXOptimizedPipeline:
 
         sigma_values = self._get_sigma_schedule()
         total_steps = len(sigma_values) - 1
-        sigmas = torch.Tensor(sigma_values).to(self.device)
+        sigmas = torch.tensor(sigma_values, dtype=torch.float32, device=self.device)
         step_counter = [0]
 
         def denoising_loop(
             sigmas: torch.Tensor, video_state: Any, audio_state: Any, stepper: EulerDiffusionStep,
         ) -> tuple[Any, Any]:
-            base_denoise = simple_denoising_func(
-                video_context=video_context, audio_context=audio_context, transformer=transformer,
-            )
+            use_cfg = not self._is_distilled_mode()
+            if use_cfg and neg_video_context is not None:
+                video_guider_factory = MultiModalGuiderFactory.constant(
+                    video_guider_defaults,
+                    negative_context=neg_video_context,
+                )
+                audio_guider_factory = MultiModalGuiderFactory.constant(
+                    audio_guider_defaults,
+                    negative_context=neg_audio_context,
+                )
+                base_denoise = multi_modal_guider_factory_denoising_func(
+                    video_guider_factory=video_guider_factory,
+                    audio_guider_factory=audio_guider_factory,
+                    v_context=video_context,
+                    a_context=audio_context,
+                    transformer=transformer,
+                )
+            else:
+                base_denoise = simple_denoising_func(
+                    video_context=video_context, audio_context=audio_context, transformer=transformer,
+                )
             def tracked_denoise(*args: Any, **kwargs: Any) -> Any:
                 result = base_denoise(*args, **kwargs)
                 step_counter[0] += 1
@@ -843,7 +1046,7 @@ class LTXOptimizedPipeline:
             self._block_swap_wrapper.offload_all()
         else:
             self.vram_manager.offload_to_cpu("transformer", transformer)
-        self._block_swap_wrapper = None
+        # Don't clear self._block_swap_wrapper — reuse it next generation
         self.vram_manager.cleanup()
 
         # Phase 4-6: VAE decode + encode
@@ -855,6 +1058,10 @@ class LTXOptimizedPipeline:
         video_decoder = self._cached_video_decoder
         self.vram_manager.ensure_on_gpu("video_decoder", video_decoder)
         decoded_video = vae_decode_video(video_state.latent, video_decoder, tiling_config)
+
+        # Offload video decoder BEFORE loading audio models to free VRAM
+        self.vram_manager.offload_to_cpu("video_decoder", video_decoder)
+        self.vram_manager.cleanup()
 
         if self._cached_audio_decoder is None:
             self._cached_audio_decoder = self.model_ledger.audio_decoder()
@@ -868,14 +1075,13 @@ class LTXOptimizedPipeline:
 
         self.vram_manager.offload_to_cpu("audio_decoder", audio_decoder)
         self.vram_manager.offload_to_cpu("vocoder", vocoder)
+        self.vram_manager.cleanup()
 
         chunks = video_chunks_number(num_frames, tiling_config)
         encode_video_output(
             video=decoded_video, audio=decoded_audio, fps=int(frame_rate),
             output_path=output_path, video_chunks_number_value=chunks,
         )
-        self.vram_manager.offload_to_cpu("video_decoder", video_decoder)
-        self.vram_manager.cleanup()
         logger.info("[optimized] Phase 4-6 (decode+encode): %.2fs", time.perf_counter() - t4)
         logger.info("[optimized] Generation complete: %s", output_path)
 

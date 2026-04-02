@@ -5,7 +5,10 @@ import { copyToAssetFolder } from '../../lib/asset-copy'
 import { backendFetch } from '../../lib/backend'
 import { fileUrlToPath } from '../../lib/url-to-path'
 import { sanitizeForcedApiVideoSettings } from '../../lib/api-video-options'
+import { loadGenerationSettings, saveGenerationSettings } from '../../lib/generation-settings-storage'
 import { logger } from '../../lib/logger'
+
+const I2V_SETTINGS_STORAGE_KEY = 'ltx_editor_i2v_generation_settings'
 
 export interface UseRegenerationParams {
   clips: TimelineClip[]
@@ -59,7 +62,7 @@ export function useRegeneration(params: UseRegenerationParams) {
   // Image-to-Video generation from an image clip on the timeline
   const [i2vClipId, setI2vClipId] = useState<string | null>(null)
   const [i2vPrompt, setI2vPrompt] = useState('')
-  const [i2vSettings, setI2vSettings] = useState<GenerationSettings>({
+  const [i2vSettings, setI2vSettings] = useState<GenerationSettings>(() => loadGenerationSettings(I2V_SETTINGS_STORAGE_KEY, {
     model: 'fast',
     duration: 5,
     videoResolution: '540p',
@@ -69,12 +72,16 @@ export function useRegeneration(params: UseRegenerationParams) {
     imageResolution: '1080p',
     imageAspectRatio: '16:9',
     imageSteps: 30,
-  })
+  }))
 
   useEffect(() => {
     if (!shouldVideoGenerateWithLtxApi) return
     setI2vSettings((prev) => sanitizeForcedApiVideoSettings(prev))
   }, [shouldVideoGenerateWithLtxApi])
+
+  useEffect(() => {
+    saveGenerationSettings(I2V_SETTINGS_STORAGE_KEY, i2vSettings)
+  }, [i2vSettings])
 
   const handleI2vGenerate = useCallback(async () => {
     if (!i2vClipId || !i2vPrompt.trim() || !currentProjectId) return
@@ -276,7 +283,7 @@ export function useRegeneration(params: UseRegenerationParams) {
 
     if (params.mode === 'text-to-image') {
       regenGenerateImage(params.prompt, {
-        model: params.model as 'fast' | 'pro',
+        model: params.model as 'fast' | 'balanced' | 'quality' | 'custom' | 'pro',
         duration: params.duration,
         videoResolution: '540p',
         fps: params.fps,
@@ -295,7 +302,7 @@ export function useRegeneration(params: UseRegenerationParams) {
         : null
 
       const rawVideoSettings: GenerationSettings = {
-        model: params.model as 'fast' | 'pro',
+        model: params.model as 'fast' | 'balanced' | 'quality' | 'custom' | 'pro',
         duration: params.duration,
         videoResolution: params.resolution,
         fps: params.fps,

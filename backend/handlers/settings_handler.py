@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _normalize_models_dir(models_dir: str) -> str:
+    candidate = models_dir.strip()
+    if not candidate:
+        return ""
+
+    resolved = Path(candidate).expanduser()
+    nested_models_dir = resolved / "models"
+    if nested_models_dir.exists() and nested_models_dir.is_dir():
+        return str(nested_models_dir)
+    return str(resolved)
+
+
 class SettingsHandler(StateHandlerBase):
     def __init__(self, state: AppState, lock: RLock, config: RuntimeConfig) -> None:
         super().__init__(state, lock, config)
@@ -36,6 +49,8 @@ class SettingsHandler(StateHandlerBase):
                 with open(settings_file, "r", encoding="utf-8") as f:
                     payload = json.load(f)
                 migrated = migrate_legacy_settings(ensure_json_object(payload))
+                if "models_dir" in migrated and isinstance(migrated["models_dir"], str):
+                    migrated["models_dir"] = _normalize_models_dir(migrated["models_dir"])
                 merged = deep_merge_dicts(
                     ensure_json_object(default_settings.model_dump(by_alias=False)),
                     migrated,
@@ -69,6 +84,9 @@ class SettingsHandler(StateHandlerBase):
         for key_field in ("ltx_api_key", "gemini_api_key", "fal_api_key"):
             if key_field in patch_payload and patch_payload[key_field] == "":
                 del patch_payload[key_field]
+
+        if "models_dir" in patch_payload and isinstance(patch_payload["models_dir"], str):
+            patch_payload["models_dir"] = _normalize_models_dir(patch_payload["models_dir"])
 
         before = self.state.app_settings.model_copy(deep=True)
         before_payload = ensure_json_object(before.model_dump(by_alias=False))

@@ -178,6 +178,18 @@ function AppContent() {
     isForcedFirstRun && isLoaded && settings.hasLtxApiKey && !isFinalizingFirstRun && !firstRunFinalizeError
 
   const areRequiredModelsDownloaded = useCallback(async () => {
+    // First check if the app can generate with whatever models are available
+    // (including GGUF, quantized text encoders, etc.)
+    try {
+      const readinessResponse = await backendFetch('/api/models/readiness')
+      if (readinessResponse.ok) {
+        const readiness = await readinessResponse.json() as { can_generate?: boolean }
+        if (readiness.can_generate) return true
+      }
+    } catch {
+      // Fall through to legacy check
+    }
+
     const response = await backendFetch('/api/models/status')
     if (!response.ok) {
       throw new Error(`Model status fetch failed with status ${response.status}`)
@@ -187,6 +199,21 @@ function AppContent() {
   }, [])
 
   const handleMissingModelsComplete = useCallback(async () => {
+    // Check readiness (can generate with any available models)
+    try {
+      const readinessResponse = await backendFetch('/api/models/readiness')
+      if (readinessResponse.ok) {
+        const readiness = await readinessResponse.json() as { can_generate?: boolean }
+        if (readiness.can_generate) {
+          await handleFirstRunComplete()
+          setRequiredModelsGate('ready')
+          return
+        }
+      }
+    } catch {
+      // Fall through
+    }
+
     const allDownloaded = await areRequiredModelsDownloaded()
     if (!allDownloaded) {
       throw new Error('Required models are still missing. Please finish downloading before continuing.')

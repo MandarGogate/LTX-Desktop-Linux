@@ -30,9 +30,10 @@ class VRAMTier(Enum):
 class OffloadStrategy(Enum):
     """Model offloading strategy."""
 
-    NONE = "none"                # All models on GPU (≥31GB, original behavior)
-    SEQUENTIAL = "sequential"    # One model at a time on GPU
-    BLOCK_SWAP = "block_swap"    # Transformer blocks swapped between CPU/GPU
+    NONE = "none"                    # All models on GPU (≥48GB, original behavior)
+    SEQUENTIAL = "sequential"        # One model at a time on GPU (no block swap)
+    BLOCK_SWAP = "block_swap"        # Sequential offloading + transformer block swap
+    BLOCK_SWAP_AGGRESSIVE = "block_swap_aggressive"  # Aggressive block swap for max resolution
 
 
 # Resolution maps per tier for 16:9 aspect ratio
@@ -58,11 +59,14 @@ _RESOLUTION_MAP_16_9: dict[VRAMTier, dict[str, tuple[int, int]]] = {
 
 # Maximum number of transformer blocks to keep on GPU during block swap.
 # Lower tiers keep fewer blocks on GPU.
+# Maximum number of transformer blocks to keep on GPU during block swap.
+# Lower values = less VRAM but more CPU↔GPU transfers.
+# With async prefetch, keeping 2-3 blocks gives good overlap.
 _BLOCK_SWAP_KEEP_ON_GPU: dict[VRAMTier, int] = {
-    VRAMTier.HIGH: 0,       # No block swap needed
-    VRAMTier.MEDIUM: 12,    # Keep 12 of 48 blocks on GPU
-    VRAMTier.LOW: 6,        # Keep 6 of 48 blocks on GPU
-    VRAMTier.VERY_LOW: 3,   # Keep only 3 of 48 blocks on GPU
+    VRAMTier.HIGH: 5,       # Keep 5 of 48 blocks — FP8 block=370MB → ~1.85GB
+    VRAMTier.MEDIUM: 5,     # Keep 5 of 48 blocks on GPU
+    VRAMTier.LOW: 3,        # Keep 3 of 48 blocks on GPU
+    VRAMTier.VERY_LOW: 2,   # Keep only 2 of 48 blocks on GPU
 }
 
 
@@ -77,16 +81,26 @@ class VRAMManager:
     - Tiling configuration for VAE decode
     """
 
-    def __init__(self, device: torch.device, total_vram_gb: int) -> None:
+    def __init__(
+        self,
+        device: torch.device,
+        total_vram_gb: int,
+        *,
+        user_blocks_on_gpu: int = -1,
+        user_run_mode: str = "auto",
+    ) -> None:
         import torch as _torch
 
         self.device = device
         self.total_vram_gb = total_vram_gb
-        self.tier = self._classify_tier(total_vram_gb)
+        self._user_blocks_on_gpu = user_blocks_on_gpu
+        self._user_run_mode = user_run_mode
+        self._has_logged_block_cap = False
+        self.tier = self._resolve_tier(total_vram_gb, user_run_mode)
         self._torch = _torch
         logger.info(
-            "VRAMManager initialized: device=%s vram=%dGB tier=%s",
-            device, total_vram_gb, self.tier.value,
+            "VRAMManager initialized: device=%s vram=%dGB tier=%s run_mode=%s user_blocks=%d",
+            device, total_vram_gb, self.tier.value, user_run_mode, user_blocks_on_gpu,
         )
 
     @staticmethod
@@ -100,18 +114,67 @@ class VRAMManager:
             return VRAMTier.LOW
         return VRAMTier.VERY_LOW
 
+    @staticmethod
+    def _resolve_tier(vram_gb: int, user_run_mode: str) -> VRAMTier:
+        """Resolve tier from user run mode or auto-detect."""
+        mode_to_tier: dict[str, VRAMTier] = {
+            "high_vram": VRAMTier.HIGH,
+            "medium_vram": VRAMTier.MEDIUM,
+            "low_vram": VRAMTier.LOW,
+            "very_low_vram": VRAMTier.VERY_LOW,
+        }
+        if user_run_mode in mode_to_tier:
+            return mode_to_tier[user_run_mode]
+        return VRAMManager._classify_tier(vram_gb)
+
     @property
     def offload_strategy(self) -> OffloadStrategy:
-        """Determine the offloading strategy for this tier."""
-        if self.total_vram_gb >= 31:
+        """Determine the offloading strategy for this tier.
+
+        The LTX 2.3 transformer is ~35GB bf16 / ~18GB FP8, so even 24GB GPUs
+        cannot hold it entirely. Block swap is required for all tiers < 48GB.
+        """
+        if self.total_vram_gb >= 48:
             return OffloadStrategy.NONE
         if self.tier in (VRAMTier.LOW, VRAMTier.VERY_LOW):
-            return OffloadStrategy.BLOCK_SWAP
-        return OffloadStrategy.SEQUENTIAL
+            return OffloadStrategy.BLOCK_SWAP_AGGRESSIVE
+        # HIGH and MEDIUM: sequential offloading + block swap
+        return OffloadStrategy.BLOCK_SWAP
 
     @property
     def block_swap_keep_on_gpu(self) -> int:
-        """Number of transformer blocks to keep on GPU during block swap."""
+        """Number of transformer blocks to keep on GPU during block swap.
+
+        If the user has set a custom value (>= 0), use that. Otherwise,
+        use the tier-based default.
+        """
+        auto_blocks = _BLOCK_SWAP_KEEP_ON_GPU.get(self.tier, 0)
+        safe_max = self._max_safe_block_swap_keep_on_gpu()
+        if self._user_blocks_on_gpu < 0:
+            return min(auto_blocks, safe_max)
+
+        requested = min(self._user_blocks_on_gpu, 48)
+        effective = min(requested, safe_max)
+        if requested > effective and not self._has_logged_block_cap:
+            logger.warning(
+                "Capping block-swap GPU blocks from %d to %d for %dGB/%s to avoid OOM",
+                requested,
+                effective,
+                self.total_vram_gb,
+                self.tier.value,
+            )
+            self._has_logged_block_cap = True
+        return effective
+
+    def _max_safe_block_swap_keep_on_gpu(self) -> int:
+        """Return the runtime safety cap for resident transformer blocks.
+
+        User overrides are intentionally bounded here. Large values can force
+        tens of gigabytes of blocks onto GPU before denoising starts, which
+        defeats low-VRAM mode and reliably OOMs on 24GB-class cards.
+        """
+        if self.total_vram_gb >= 48:
+            return 48
         return _BLOCK_SWAP_KEEP_ON_GPU.get(self.tier, 0)
 
     def get_available_resolutions(self) -> dict[str, tuple[int, int]]:
@@ -130,20 +193,51 @@ class VRAMManager:
     def get_max_frames(self, width: int, height: int, fps: int) -> int:
         """Estimate maximum frame count based on VRAM budget.
 
-        Uses a conservative heuristic: reserves ~60% of VRAM for models and
-        uses the remaining 40% for inference working memory. Each frame in
-        latent space costs approximately (width * height * 0.001) MB.
+        With sequential offloading + block swap, the VRAM budget during
+        denoising is dominated by:
+        - Active transformer blocks (~2-4GB)
+        - Latent tensors (scale with resolution × frames)
+        - Intermediate activations (~2× latent size)
+
+        Latent space is (H/32)×(W/32)×(F/8) × channels(128) × 2 bytes (bf16).
+        Working memory is roughly 3× latent size for noise, predicted noise, etc.
         """
-        pixels_per_frame = width * height
-        # Reserve memory for the largest model (transformer) + overhead
-        vram_for_inference_mb = self.total_vram_gb * 1024 * 0.4
-        cost_per_frame_mb = pixels_per_frame * 0.001
-        if cost_per_frame_mb <= 0:
+        # Latent dimensions
+        lat_h = height // 32
+        lat_w = width // 32
+        channels = 128
+        bytes_per_element = 2  # bf16
+
+        # During denoising, we need: latent + noise + predicted + intermediate
+        # ≈ 4 copies of the latent tensor
+        copies_needed = 4
+
+        # VRAM available for latents during denoising phase
+        # With block swap: only a few blocks on GPU + non-block overhead
+        blocks_on_gpu = self.block_swap_keep_on_gpu
+        fp8_block_mb = 370  # FP8 block is ~370MB
+        bf16_block_mb = 738  # bf16 block is ~738MB
+        block_mb = fp8_block_mb if self.get_fp8_enabled() else bf16_block_mb
+        transformer_overhead_mb = blocks_on_gpu * block_mb + 1024  # +1GB for non-block parts
+
+        vram_total_mb = self.total_vram_gb * 1024
+        vram_for_latents_mb = max(vram_total_mb - transformer_overhead_mb - 512, 1024)  # 512MB safety margin
+
+        # Cost per frame in latent space
+        cost_per_frame_bytes = lat_h * lat_w * channels * bytes_per_element * copies_needed
+        cost_per_frame_mb = cost_per_frame_bytes / (1024 * 1024)
+        # Also account for temporal latent compression (frames/8)
+        # Actually each latent frame = 1/8 of a video frame
+        cost_per_8_frames_mb = cost_per_frame_mb  # one latent frame covers 8 video frames
+
+        if cost_per_8_frames_mb <= 0:
             return 9
 
-        raw_frames = int(vram_for_inference_mb / cost_per_frame_mb)
-        # Align to 8-frame boundary + 1 (LTX requirement)
-        aligned = ((raw_frames // 8) * 8) + 1
+        raw_latent_frames = int(vram_for_latents_mb / cost_per_8_frames_mb)
+        raw_video_frames = raw_latent_frames * 8
+
+        # Align to 8-frame boundary + 1 (LTX requirement: frames = 8k + 1)
+        aligned = ((raw_video_frames // 8) * 8) + 1
         return max(9, min(aligned, 201))
 
     def should_use_gguf(self) -> bool:
@@ -208,6 +302,9 @@ class VRAMManager:
         self._empty_cache()
         gc.collect()
         self._empty_cache()
+        # Second gc pass catches reference cycles freed by first pass
+        gc.collect()
+        self._empty_cache()
 
     def get_current_vram_usage_mb(self) -> int:
         """Get current VRAM usage in MB (CUDA only)."""
@@ -218,6 +315,30 @@ class VRAMManager:
             pass
         return 0
 
+    def get_vram_debug_stats_mb(self) -> dict[str, int]:
+        """Return VRAM stats comparable to PyTorch and driver-level views."""
+        stats = {
+            "memory_allocated_mb": 0,
+            "memory_reserved_mb": 0,
+            "driver_used_mb": 0,
+        }
+        try:
+            if not self._torch.cuda.is_available():
+                return stats
+
+            stats["memory_allocated_mb"] = int(
+                self._torch.cuda.memory_allocated(self.device) / (1024 * 1024)
+            )
+            stats["memory_reserved_mb"] = int(
+                self._torch.cuda.memory_reserved(self.device) / (1024 * 1024)
+            )
+
+            free_bytes, total_bytes = self._torch.cuda.mem_get_info(self.device)
+            stats["driver_used_mb"] = int((total_bytes - free_bytes) / (1024 * 1024))
+        except Exception:
+            pass
+        return stats
+
     def get_free_vram_mb(self) -> int:
         """Get estimated free VRAM in MB."""
         total_mb = self.total_vram_gb * 1024
@@ -227,11 +348,18 @@ class VRAMManager:
     def to_profile_dict(self) -> dict[str, object]:
         """Return a JSON-serializable profile for the /vram-profile endpoint."""
         max_w, max_h = self.get_max_resolution()
+        auto_tier = self._classify_tier(self.total_vram_gb)
+        auto_blocks = _BLOCK_SWAP_KEEP_ON_GPU.get(auto_tier, 0)
         return {
             "tier": self.tier.value,
             "vram_total_gb": self.total_vram_gb,
             "offload_strategy": self.offload_strategy.value,
             "block_swap_blocks_on_gpu": self.block_swap_keep_on_gpu,
+            "auto_blocks_on_gpu": auto_blocks,
+            "max_blocks": 48,
+            "user_blocks_on_gpu": self._user_blocks_on_gpu,
+            "user_run_mode": self._user_run_mode,
+            "auto_tier": auto_tier.value,
             "max_resolution_width": max_w,
             "max_resolution_height": max_h,
             "available_resolutions": {
@@ -244,4 +372,11 @@ class VRAMManager:
             "gguf_recommended": self.should_use_gguf(),
             "gguf_quant_level": self.get_recommended_gguf_quant(),
             "fp8_enabled": self.get_fp8_enabled(),
+            "run_modes": [
+                {"value": "auto", "label": f"Auto ({auto_tier.value})", "description": "Detects optimal settings from your GPU"},
+                {"value": "high_vram", "label": "High VRAM (≥24 GB)", "description": "Max quality, minimal offloading"},
+                {"value": "medium_vram", "label": "Medium VRAM (16-23 GB)", "description": "Balanced quality and speed"},
+                {"value": "low_vram", "label": "Low VRAM (12-15 GB)", "description": "Aggressive offloading, lower resolution"},
+                {"value": "very_low_vram", "label": "Very Low VRAM (8-11 GB)", "description": "Maximum offloading, lowest resolution"},
+            ],
         }

@@ -143,13 +143,10 @@ class IcLoraHandler(StateHandlerBase):
             self._generation.start_generation(generation_id)
             self._generation.update_progress("loading_model", 5, 0, 1)
 
-            s = self.state.app_settings
-            use_api = not self._text.should_use_local_encoding()
-            encoding_method = "api" if use_api else "local"
             t_text_start = time.perf_counter()
-            self._text.prepare_text_encoding(req.prompt, enhance_prompt=use_api and s.prompt_enhancer_enabled_t2v)
+            self._text.prepare_text_encoding(req.prompt, enhance_prompt=False)
             t_text_end = time.perf_counter()
-            logger.info("[ic-lora] Text encoding (%s): %.2fs", encoding_method, t_text_end - t_text_start)
+            logger.info("[ic-lora] Text encoding (local): %.2fs", t_text_end - t_text_start)
 
             cap = self._video_processor.open_video(str(video_path))
             if not cap.isOpened():

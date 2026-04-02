@@ -111,8 +111,14 @@ class ImageGenerationHandler(StateHandlerBase):
             if self._generation.is_generation_cancelled():
                 raise RuntimeError("Generation was cancelled")
 
-            progress = 15 + int((i / num_images) * 80)
-            self._generation.update_progress("inference", progress, i, num_images)
+            image_base_progress = 15 + int((i / num_images) * 75)
+            image_progress_span = max(1, int(75 / num_images))
+            self._generation.update_progress("inference", image_base_progress, 0, num_inference_steps)
+
+            def on_step(current_step: int, total_steps: int) -> None:
+                step_fraction = current_step / max(total_steps, 1)
+                progress = image_base_progress + int(step_fraction * image_progress_span)
+                self._generation.update_progress("inference", progress, current_step, total_steps)
 
             result = zit.generate(
                 prompt=prompt,
@@ -121,6 +127,7 @@ class ImageGenerationHandler(StateHandlerBase):
                 guidance_scale=0.0,
                 num_inference_steps=num_inference_steps,
                 seed=seed + i,
+                progress_callback=on_step,
             )
 
             output_path = self.config.outputs_dir / f"zit_image_{timestamp}_{uuid.uuid4().hex[:8]}.png"

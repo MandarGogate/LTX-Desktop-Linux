@@ -14,6 +14,7 @@ import { useIcLora } from '../hooks/use-ic-lora'
 import type { ICLoraConditioningType } from '../components/ICLoraPanel'
 import type { Asset } from '../types/project'
 import { GenerationErrorDialog } from '../components/GenerationErrorDialog'
+import type { GenerationSettings } from '../components/SettingsPanel'
 import { copyToAssetFolder } from '../lib/asset-copy'
 import { fileUrlToPath } from '../lib/url-to-path'
 import {
@@ -22,10 +23,11 @@ import {
   getAllowedForcedApiDurations,
   sanitizeForcedApiVideoSettings,
 } from '../lib/api-video-options'
+import { loadGenerationSettings, loadStringSetting, saveGenerationSettings, saveStringSetting } from '../lib/generation-settings-storage'
 import { logger } from '../lib/logger'
+import { persistSelectableFile } from '../lib/web-file-upload'
 import { RetakePanel } from '../components/RetakePanel'
 import { ICLoraPanel, CONDITIONING_TYPES } from '../components/ICLoraPanel'
-import { FreeApiKeyBubble } from '../components/FreeApiKeyBubble'
 
 // Asset card with hover overlays
 function AssetCard({
@@ -340,6 +342,8 @@ function PromptBar({
   onIcLoraCondTypeChange,
   icLoraStrength,
   onIcLoraStrengthChange,
+  cameraMotion,
+  onCameraMotionChange,
 }: {
   mode: 'image' | 'video' | 'retake' | 'ic-lora'
   onModeChange: (mode: 'image' | 'video' | 'retake' | 'ic-lora') => void
@@ -355,20 +359,13 @@ function PromptBar({
   onInputImageChange: (url: string | null) => void
   inputAudio: string | null
   onInputAudioChange: (url: string | null) => void
-  settings: {
-    model: string
-    duration: number
-    videoResolution: string
-    fps: number
-    aspectRatio: string
-    imageResolution: string
-    variations: number
-    audio?: boolean
-  }
-  onSettingsChange: (settings: any) => void
+  settings: GenerationSettings
+  onSettingsChange: (settings: GenerationSettings) => void
   shouldVideoGenerateWithLtxApi: boolean
   icLoraCondType?: ICLoraConditioningType
   onIcLoraCondTypeChange?: (type: ICLoraConditioningType) => void
+  cameraMotion: string
+  onCameraMotionChange: (value: string) => void
   icLoraStrength?: number
   onIcLoraStrengthChange?: (strength: number) => void
 }) {
@@ -378,17 +375,17 @@ function PromptBar({
   const [isAudioDragOver, setIsAudioDragOver] = useState(false)
   const isRetake = mode === 'retake'
   const isIcLora = mode === 'ic-lora'
-  const LOCAL_MAX_DURATION: Record<string, number> = { '540p': 20, '720p': 10, '1080p': 5 }
+  const LOCAL_MAX_DURATION: Record<string, number> = { '540p': 20, '720p': 20, '1080p': 20 }
   const localMaxDuration = LOCAL_MAX_DURATION[settings.videoResolution] ?? 20
   const videoDurationOptions = shouldVideoGenerateWithLtxApi
     ? [...getAllowedForcedApiDurations(settings.model, settings.videoResolution, settings.fps)]
-    : [5, 6, 8, 10, 20].filter(d => d <= localMaxDuration)
+    : [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20].filter(d => d <= localMaxDuration)
   const videoResolutionOptions = shouldVideoGenerateWithLtxApi
     ? (inputAudio ? ['1080p'] : [...FORCED_API_VIDEO_RESOLUTIONS])
     : ['540p', '720p', '1080p']
   const videoFpsOptions = shouldVideoGenerateWithLtxApi ? [...FORCED_API_VIDEO_FPS] : [24, 25, 50]
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragOver(false)
 
@@ -399,9 +396,15 @@ function PromptBar({
         onInputImageChange(asset.url)
       }
     }
+
+    const file = e.dataTransfer.files?.[0]
+    if (file && file.type.startsWith('image/')) {
+      const { url } = await persistSelectableFile(file, 'image')
+      onInputImageChange(url)
+    }
   }
 
-  const handleAudioDrop = (e: React.DragEvent) => {
+  const handleAudioDrop = async (e: React.DragEvent) => {
     e.preventDefault()
     setIsAudioDragOver(false)
 
@@ -418,42 +421,24 @@ function PromptBar({
     if (file) {
       const ext = file.name.split('.').pop()?.toLowerCase()
       if (['mp3', 'wav', 'ogg', 'aac', 'flac', 'm4a'].includes(ext || '')) {
-        const filePath = (file as any).path as string | undefined
-        if (filePath) {
-          const normalized = filePath.replace(/\\/g, '/')
-          const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
-          onInputAudioChange(fileUrl)
-        }
+        const { url } = await persistSelectableFile(file, 'audio')
+        onInputAudioChange(url)
       }
     }
   }
 
-  const handleAudioFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAudioFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) {
-      const filePath = (file as any).path as string | undefined
-      if (filePath) {
-        const normalized = filePath.replace(/\\/g, '/')
-        const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
-        onInputAudioChange(fileUrl)
-      }
-    }
+    if (!file) return
+    const { url } = await persistSelectableFile(file, 'audio')
+    onInputAudioChange(url)
   }
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file && file.type.startsWith('image/')) {
-      // In Electron, File objects have a .path property with the full filesystem path
-      const filePath = (file as any).path as string | undefined
-      if (filePath) {
-        const normalized = filePath.replace(/\\/g, '/')
-        const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
-        onInputImageChange(fileUrl)
-      } else {
-        const url = URL.createObjectURL(file)
-        onInputImageChange(url)
-      }
-    }
+    if (!file || !file.type.startsWith('image/')) return
+    const { url } = await persistSelectableFile(file, 'image')
+    onInputImageChange(url)
   }
   
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -647,7 +632,7 @@ function PromptBar({
             {/* Aspect ratio dropdown */}
             <SettingsDropdown
               title="RATIO"
-              value={settings.aspectRatio}
+              value={settings.aspectRatio || '16:9'}
               onChange={(v) => onSettingsChange({ ...settings, aspectRatio: v })}
               options={[
                 { value: '16:9', label: '16:9' },
@@ -657,7 +642,7 @@ function PromptBar({
               trigger={
                 <>
                   <AspectIcon className="h-3.5 w-3.5" />
-                  <span>{settings.aspectRatio}</span>
+                  <span>{settings.aspectRatio || '16:9'}</span>
                 </>
               }
             />
@@ -668,7 +653,7 @@ function PromptBar({
             <SettingsDropdown
               title="MODEL"
               value={settings.model}
-              onChange={(v) => onSettingsChange({ ...settings, model: v })}
+              onChange={(v) => onSettingsChange({ ...settings, model: v as GenerationSettings['model'] })}
               options={
                 shouldVideoGenerateWithLtxApi
                   ? [
@@ -677,6 +662,8 @@ function PromptBar({
                     ]
                   : [
                       { value: 'fast', label: 'LTX 2.3 Fast' },
+                      { value: 'balanced', label: 'LTX 2.3 Balanced' },
+                      { value: 'custom', label: 'LTX 2.3 Custom' },
                     ]
               }
               trigger={
@@ -685,7 +672,9 @@ function PromptBar({
                   <span className="text-zinc-300 font-medium">
                     {shouldVideoGenerateWithLtxApi
                       ? (settings.model === 'pro' ? 'LTX-2.3 Pro (API)' : 'LTX-2.3 Fast (API)')
-                      : 'LTX 2.3 Fast'}
+                      : settings.model === 'custom' ? 'LTX 2.3 Custom'
+                      : settings.model === 'fast' ? 'LTX 2.3 Fast'
+                      : 'LTX 2.3 Balanced'}
                   </span>
                 </>
               }
@@ -743,7 +732,7 @@ function PromptBar({
             {/* Aspect Ratio dropdown */}
             <SettingsDropdown
               title="ASPECT RATIO"
-              value={settings.aspectRatio}
+              value={settings.aspectRatio || '16:9'}
               onChange={(v) => onSettingsChange({ ...settings, aspectRatio: v })}
               options={inputAudio
                 ? [{ value: '16:9', label: '16:9' }]
@@ -756,6 +745,30 @@ function PromptBar({
                 <>
                   <AspectIcon className="h-3.5 w-3.5" />
                   <span>{settings.aspectRatio}</span>
+                </>
+              }
+            />
+
+            {/* Camera Motion dropdown */}
+            <SettingsDropdown
+              title="CAMERA MOTION"
+              value={cameraMotion}
+              onChange={(v) => onCameraMotionChange(v)}
+              options={[
+                { value: 'none', label: 'None' },
+                { value: 'static', label: 'Static' },
+                { value: 'dolly_in', label: 'Dolly In' },
+                { value: 'dolly_out', label: 'Dolly Out' },
+                { value: 'dolly_left', label: 'Dolly Left' },
+                { value: 'dolly_right', label: 'Dolly Right' },
+                { value: 'jib_up', label: 'Jib Up' },
+                { value: 'jib_down', label: 'Jib Down' },
+                { value: 'focus_shift', label: 'Focus Shift' },
+              ]}
+              trigger={
+                <>
+                  <Film className="h-3.5 w-3.5" />
+                  <span>{cameraMotion === 'none' ? 'Cam' : cameraMotion.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}</span>
                 </>
               }
             />
@@ -836,16 +849,22 @@ const gallerySizeClasses: Record<GallerySize, string> = {
   large: 'grid-cols-1 sm:grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3',
 }
 
-const DEFAULT_VIDEO_SETTINGS = {
+const DEFAULT_VIDEO_SETTINGS: GenerationSettings = {
   model: 'fast',
   duration: 5,
   videoResolution: '540p',
   fps: 24,
+  cameraMotion: 'none',
   aspectRatio: '16:9',
   imageResolution: '1080p',
+  imageAspectRatio: '16:9',
+  imageSteps: 4,
   variations: 1,
   audio: true,
 }
+
+const GENSPACE_SETTINGS_STORAGE_KEY = 'ltx_genspace_generation_settings'
+const GENSPACE_CAMERA_MOTION_STORAGE_KEY = 'ltx_genspace_camera_motion'
 
 export function GenSpace() {
   const {
@@ -867,7 +886,7 @@ export function GenSpace() {
     setGenSpaceIcLoraSource,
     setPendingIcLoraUpdate,
   } = useProjects()
-  const { shouldVideoGenerateWithLtxApi, forceApiGenerations, settings: appSettings } = useAppSettings()
+  const { shouldVideoGenerateWithLtxApi, forceApiGenerations } = useAppSettings()
   const [mode, setMode] = useState<'image' | 'video' | 'retake' | 'ic-lora'>('video')
   const [prompt, setPrompt] = useState('')
   const [inputImage, setInputImage] = useState<string | null>(null)
@@ -897,9 +916,13 @@ export function GenSpace() {
       conditioningStrength: number
     }
   } | null>(null)
-  const [settings, setSettings] = useState(() => ({ ...DEFAULT_VIDEO_SETTINGS }))
+  const [settings, setSettings] = useState<GenerationSettings>(() => loadGenerationSettings(
+    GENSPACE_SETTINGS_STORAGE_KEY,
+    DEFAULT_VIDEO_SETTINGS,
+  ))
+  const [cameraMotion, setCameraMotion] = useState(() => loadStringSetting(GENSPACE_CAMERA_MOTION_STORAGE_KEY, 'none'))
   const applyForcedVideoSettings = useCallback(
-    (next: { model: string; duration: number; videoResolution: string; fps: number; audio: boolean; aspectRatio: string; imageResolution: string; variations: number }) => {
+    (next: GenerationSettings) => {
       if (!shouldVideoGenerateWithLtxApi || mode !== 'video') return next
       return sanitizeForcedApiVideoSettings(next, { hasAudio: !!inputAudio })
     },
@@ -1037,6 +1060,21 @@ export function GenSpace() {
     if (!shouldVideoGenerateWithLtxApi || mode !== 'video') return
     setSettings((prev) => applyForcedVideoSettings({ ...prev, model: 'fast' }))
   }, [applyForcedVideoSettings, mode, shouldVideoGenerateWithLtxApi])
+
+  useEffect(() => {
+    saveGenerationSettings(GENSPACE_SETTINGS_STORAGE_KEY, {
+      ...settings,
+      cameraMotion,
+      aspectRatio: settings.aspectRatio || '16:9',
+      imageAspectRatio: settings.aspectRatio || '16:9',
+      imageSteps: settings.imageSteps || 4,
+      variations: settings.variations ?? 1,
+    })
+  }, [cameraMotion, settings])
+
+  useEffect(() => {
+    saveStringSetting(GENSPACE_CAMERA_MOTION_STORAGE_KEY, cameraMotion)
+  }, [cameraMotion])
 
   useEffect(() => {
     if (retakeError) {
@@ -1330,16 +1368,16 @@ export function GenSpace() {
       generateImage(
         prompt,
         {
-          model: 'fast' as 'fast' | 'pro',
+          model: 'fast' as 'fast' | 'balanced' | 'quality' | 'custom' | 'pro',
           duration: 5,
           videoResolution: settings.videoResolution,
           fps: 24,
           audio: false,
           cameraMotion: 'none',
           imageResolution: settings.imageResolution,
-          imageAspectRatio: settings.aspectRatio,
+          imageAspectRatio: settings.aspectRatio || '16:9',
           imageSteps: 4,
-          variations: settings.variations,
+          variations: settings.variations ?? 1,
         }
       )
     } else {
@@ -1348,22 +1386,24 @@ export function GenSpace() {
       const imagePath = inputImage ? fileUrlToPath(inputImage) : null
       const audioPath = inputAudio ? fileUrlToPath(inputAudio) : null
       const videoSettings = applyForcedVideoSettings(settings)
+      if (videoSettings.model === 'quality') videoSettings.model = 'balanced'
       if (audioPath) videoSettings.model = 'pro'
 
-      generate(
+        generate(
         prompt,
         imagePath,
         {
-          model: videoSettings.model as 'fast' | 'pro',
+          model: videoSettings.model as 'fast' | 'balanced' | 'quality' | 'custom' | 'pro',
           duration: videoSettings.duration,
           videoResolution: videoSettings.videoResolution,
           fps: videoSettings.fps,
           audio: videoSettings.audio || false,
-          cameraMotion: 'none',
-          aspectRatio: videoSettings.aspectRatio,
+          cameraMotion: cameraMotion,
+          aspectRatio: videoSettings.aspectRatio || '16:9',
           imageResolution: videoSettings.imageResolution,
-          imageAspectRatio: videoSettings.aspectRatio,
-          imageSteps: 4,
+          imageAspectRatio: videoSettings.aspectRatio || '16:9',
+          imageSteps: videoSettings.imageSteps || 4,
+          variations: videoSettings.variations ?? 1,
         },
         audioPath,
       )
@@ -1638,12 +1678,6 @@ export function GenSpace() {
       {/* Floating prompt panel — wider, responsive, centered */}
       <div className="absolute bottom-5 left-1/2 w-[min(700px,calc(100%-2rem))] -translate-x-1/2">
 
-        <FreeApiKeyBubble
-          forceApiGenerations={forceApiGenerations}
-          hasLtxApiKey={appSettings.hasLtxApiKey}
-          isGenerating={isGenerating}
-        />
-
         {/* Prompt bar */}
         <PromptBar
           mode={mode}
@@ -1667,6 +1701,8 @@ export function GenSpace() {
           onIcLoraCondTypeChange={setIcLoraCondType}
           icLoraStrength={icLoraStrength}
           onIcLoraStrengthChange={setIcLoraStrength}
+          cameraMotion={cameraMotion}
+          onCameraMotionChange={setCameraMotion}
         />
       </div>
       

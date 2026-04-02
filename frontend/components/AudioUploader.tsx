@@ -2,6 +2,7 @@ import { useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { Upload, Music, RefreshCw, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { persistSelectableFile } from '../lib/web-file-upload'
 
 interface AudioUploaderProps {
   onAudioSelect: (path: string | null) => void
@@ -9,15 +10,15 @@ interface AudioUploaderProps {
 }
 
 export function AudioUploader({ onAudioSelect, selectedAudio }: AudioUploaderProps) {
-  const onDrop = useCallback((acceptedFiles: File[]) => {
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
     const file = acceptedFiles[0]
-    if (file) {
-      const filePath = (file as any).path as string | undefined
-      if (filePath) {
-        const normalized = filePath.replace(/\\/g, '/')
-        const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
-        onAudioSelect(fileUrl)
-      }
+    if (!file) return
+
+    try {
+      const { url } = await persistSelectableFile(file, 'audio')
+      onAudioSelect(url)
+    } catch {
+      onAudioSelect(null)
     }
   }, [onAudioSelect])
 

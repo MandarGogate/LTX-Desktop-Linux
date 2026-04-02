@@ -2,6 +2,7 @@ import { useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { Upload, Image as ImageIcon, RefreshCw, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { persistSelectableFile } from '../lib/web-file-upload'
 
 interface ImageUploaderProps {
   onImageSelect: (path: string | null) => void
@@ -9,19 +10,15 @@ interface ImageUploaderProps {
 }
 
 export function ImageUploader({ onImageSelect, selectedImage }: ImageUploaderProps) {
-  const onDrop = useCallback((acceptedFiles: File[]) => {
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
     const file = acceptedFiles[0]
-    if (file) {
-      // In Electron, File objects have a .path property with the full filesystem path
-      const filePath = (file as any).path as string | undefined
-      if (filePath) {
-        const normalized = filePath.replace(/\\/g, '/')
-        const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
-        onImageSelect(fileUrl)
-      } else {
-        const url = URL.createObjectURL(file)
-        onImageSelect(url)
-      }
+    if (!file) return
+
+    try {
+      const { url } = await persistSelectableFile(file, 'image')
+      onImageSelect(url)
+    } catch {
+      onImageSelect(null)
     }
   }, [onImageSelect])
 

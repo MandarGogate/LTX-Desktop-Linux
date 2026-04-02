@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Literal, Protocol
+from typing import TYPE_CHECKING, Callable, ClassVar, Literal, Protocol
 
 from api_types import ImageConditioningInput
 
@@ -19,6 +19,10 @@ class FastVideoPipeline(Protocol):
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
+        *,
+        lora_path: str | None = None,
+        lora_strength: float = 1.0,
+        extra_loras: list[tuple[str, float]] | None = None,
     ) -> "FastVideoPipeline":
         ...
 
@@ -32,6 +36,8 @@ class FastVideoPipeline(Protocol):
         frame_rate: float,
         images: list[ImageConditioningInput],
         output_path: str,
+        progress_callback: "Callable[[int, int], None] | None" = None,
+        negative_prompt: str = "",
     ) -> None:
         ...
 

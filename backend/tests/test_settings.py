@@ -24,7 +24,8 @@ class TestGetSettings:
         assert data["hasFalApiKey"] is False
         assert data["useLocalTextEncoder"] is False
         assert data["fastModel"] == {"useUpscaler": True}
-        assert data["proModel"] == {"steps": 20, "useUpscaler": True}
+        assert data["proModel"] == {"steps": 30, "useUpscaler": True}
+        assert data["customModel"] == {"steps": 20, "useUpscaler": True}
         assert data["promptCacheSize"] == 100
         assert data["promptEnhancerEnabledT2V"] is True
         assert data["promptEnhancerEnabledI2V"] is False
@@ -78,6 +79,12 @@ class TestPostSettings:
         assert r.status_code == 200
         assert test_state.state.app_settings.pro_model.steps == 30
         assert test_state.state.app_settings.pro_model.use_upscaler is True
+
+    def test_update_custom_model(self, client, test_state):
+        r = client.post("/api/settings", json={"customModel": {"steps": 12, "useUpscaler": False}})
+        assert r.status_code == 200
+        assert test_state.state.app_settings.custom_model.steps == 12
+        assert test_state.state.app_settings.custom_model.use_upscaler is False
 
     def test_prompt_cache_size_clamped_max(self, client, test_state):
         r = client.post("/api/settings", json={"promptCacheSize": 5000})
@@ -208,6 +215,16 @@ class TestModelsDirAdminGuard:
         assert loaded.state.app_settings.models_dir == "/tmp/persisted-models"
         assert loaded.models.models_dir == Path("/tmp/persisted-models")
 
+    def test_models_dir_normalizes_app_data_root_to_models_subdir(self, client, test_state):
+        app_data_root = test_state.config.default_models_dir.parent
+        r = client.post(
+            "/api/settings",
+            json={"modelsDir": str(app_data_root)},
+            headers={"X-Admin-Token": TEST_ADMIN_TOKEN},
+        )
+        assert r.status_code == 200
+        assert test_state.state.app_settings.models_dir == str(app_data_root / "models")
+
 
 class TestSettingsPersistence:
     def _new_state(self, test_state, default_app_settings):
@@ -248,6 +265,20 @@ class TestSettingsPersistence:
         assert loaded.state.app_settings.prompt_cache_size == 1000
         assert loaded.state.app_settings.locked_seed == 0
         assert loaded.state.app_settings.pro_model.steps == 100
+
+    def test_load_settings_normalizes_app_data_root_to_models_subdir(self, test_state, default_app_settings):
+        app_data_root = test_state.config.default_models_dir.parent
+        test_state.config.settings_file.write_text(
+            json.dumps(
+                {
+                    "models_dir": str(app_data_root),
+                }
+            )
+        )
+
+        loaded = self._new_state(test_state, default_app_settings)
+        assert loaded.state.app_settings.models_dir == str(app_data_root / "models")
+        assert loaded.models.models_dir == app_data_root / "models"
 
     def test_legacy_prompt_enhancer_key_migrates(self, test_state, default_app_settings):
         test_state.config.settings_file.write_text(

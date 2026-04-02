@@ -1,7 +1,10 @@
-"""Text encoding cache and API embedding handler."""
+"""Text encoding cache handler — local-only."""
 
 from __future__ import annotations
 
+import logging
+import os
+from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
 
@@ -11,6 +14,18 @@ from state.app_state_types import AppState, TextEncodingResult
 
 if TYPE_CHECKING:
     from runtime_config.runtime_config import RuntimeConfig
+
+logger = logging.getLogger(__name__)
+
+# Tokenizer config files required by module_ops_from_gemma_root().
+# These are small JSON/model files from the google/gemma-3-12b-it repo.
+_TOKENIZER_FILES = [
+    "tokenizer.model",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "preprocessor_config.json",
+]
+_TOKENIZER_REPO = "google/gemma-3-12b-it"
 
 
 class TextHandler(StateHandlerBase):
@@ -50,82 +65,184 @@ class TextHandler(StateHandlerBase):
     def clear_api_embeddings(self) -> None:
         self._set_api_embeddings(None)
 
-    def should_use_local_encoding(self) -> bool:
-        """Decide whether to use local text encoding based on availability.
+    # ------------------------------------------------------------------
+    # Gemma root / tokenizer config
+    # ------------------------------------------------------------------
 
-        The user's ``use_local_text_encoder`` setting acts as a tiebreaker only
-        when **both** the API key and the local encoder are available.  When only
-        one option exists, that option is used regardless of the setting.
+    def _default_text_encoder_dir(self) -> Path:
+        return resolve_model_path(
+            self.models_dir, self.config.model_download_specs, "text_encoder"
+        )
+
+    def _text_encoders_dir(self) -> Path:
+        return self.models_dir / "text_encoders"
+
+    def _find_gemma_root_dir(self) -> Path | None:
+        """Return a directory containing tokenizer.model + preprocessor_config.json.
+
+        Search order:
+        1. The default text encoder folder (gemma-3-12b-it-qat-q4_0-unquantized/)
+        2. The text_encoders/ directory itself (tokenizer files stored alongside variants)
         """
-        settings = self.state.app_settings.model_copy(deep=True)
-        api_available = bool(settings.ltx_api_key)
-        text_encoder_dir = resolve_model_path(self.models_dir, self.config.model_download_specs,"text_encoder")
-        local_available = text_encoder_dir.exists() and any(text_encoder_dir.iterdir())
+        default_dir = self._default_text_encoder_dir()
+        if default_dir.exists() and (default_dir / "tokenizer.model").exists():
+            return default_dir
 
-        if api_available and local_available:
-            return settings.use_local_text_encoder  # setting is tiebreaker
-        return local_available  # use whichever is available
+        te_dir = self._text_encoders_dir()
+        if te_dir.exists() and (te_dir / "tokenizer.model").exists():
+            return te_dir
+
+        return None
+
+    def _ensure_tokenizer_files(self) -> Path | None:
+        """Ensure tokenizer config files exist, downloading them if needed.
+
+        Returns the directory containing the tokenizer files, or None if
+        they could not be obtained.
+        """
+        existing = self._find_gemma_root_dir()
+        if existing is not None:
+            return existing
+
+        # Download tokenizer files into text_encoders/
+        te_dir = self._text_encoders_dir()
+        te_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from huggingface_hub import hf_hub_download  # type: ignore[reportUnknownVariableType]
+
+            for filename in _TOKENIZER_FILES:
+                target = te_dir / filename
+                if target.exists():
+                    continue
+                logger.info("Downloading tokenizer file: %s from %s", filename, _TOKENIZER_REPO)
+                downloaded = Path(str(hf_hub_download(  # type: ignore[reportUnknownMemberType]
+                    repo_id=_TOKENIZER_REPO,
+                    filename=filename,
+                )))
+                # hf_hub_download returns a cache path; copy to te_dir
+                if downloaded != target and downloaded.exists():
+                    import shutil
+                    shutil.copy2(str(downloaded), str(target))
+
+            logger.info("Tokenizer files ready at %s", te_dir)
+            return te_dir
+        except Exception:
+            logger.warning("Failed to download tokenizer files", exc_info=True)
+            return None
+
+    # ------------------------------------------------------------------
+    # Text encoder availability
+    # ------------------------------------------------------------------
+
+    def _preferred_variant_path(self) -> Path | None:
+        preferred = self.state.app_settings.preferred_text_encoder_path.strip()
+        if preferred:
+            preferred_path = self.models_dir / preferred
+            if preferred_path.exists() and preferred_path.is_file():
+                return preferred_path
+
+        te_dir = self._text_encoders_dir()
+        if te_dir.exists():
+            for path in sorted(te_dir.iterdir()):
+                if path.is_file() and path.suffix == ".safetensors":
+                    return path
+        return None
+
+    def _ensure_model_alias_for_builder(self, gemma_root: Path) -> None:
+        """Create a model*.safetensors alias so ModelLedger's default builder initializes.
+
+        ModelLedger expects gemma_root to contain a file matching `model*.safetensors`.
+        Quantized variants like `gemma_3_12B_it_fp4_mixed.safetensors` don't match,
+        so we create a symlink/hardlink/copy alias.
+        """
+        if any(gemma_root.glob("model*.safetensors")):
+            return
+
+        variant = self._preferred_variant_path()
+        if variant is None or not variant.exists() or variant.parent != gemma_root:
+            return
+
+        alias_path = gemma_root / "model_variant.safetensors"
+        if alias_path.exists():
+            return
+
+        try:
+            os.symlink(variant.name, alias_path)
+            logger.info("Created text encoder symlink alias: %s -> %s", alias_path, variant.name)
+            return
+        except Exception:
+            pass
+
+        try:
+            os.link(variant, alias_path)
+            logger.info("Created text encoder hardlink alias: %s -> %s", alias_path, variant.name)
+            return
+        except Exception:
+            pass
+
+        try:
+            import shutil
+            shutil.copy2(str(variant), str(alias_path))
+            logger.info("Copied text encoder alias: %s -> %s", alias_path, variant.name)
+        except Exception:
+            logger.warning("Failed to create text encoder alias for %s", variant, exc_info=True)
+
+    def _is_local_text_encoder_available(self) -> bool:
+        """Check if any local text encoder is available.
+
+        Checks (in order):
+        1. User-preferred variant path from settings
+        2. Any .safetensors or .gguf file in text_encoders/
+        3. The default text encoder folder (gemma-3-12b-it-qat-q4_0-unquantized)
+        """
+        preferred_path = self._preferred_variant_path()
+        if preferred_path is not None:
+            return True
+
+        te_dir = self._text_encoders_dir()
+        if te_dir.exists():
+            for path in te_dir.iterdir():
+                if path.is_file() and path.suffix in (".safetensors", ".gguf"):
+                    return True
+                if path.is_dir() and any(path.iterdir()):
+                    return True
+
+        default_dir = self._default_text_encoder_dir()
+        if default_dir.exists() and any(default_dir.iterdir()):
+            return True
+
+        return False
+
+    def should_use_local_encoding(self) -> bool:
+        return self._is_local_text_encoder_available()
 
     def prepare_text_encoding(self, prompt: str, enhance_prompt: bool) -> None:
-        """Validate settings and prepare text embeddings for a generation run.
+        """Validate that local text encoder is available.
 
-        Raises RuntimeError with a prefixed message if text encoding is
-        misconfigured, the local encoder is missing, or API encoding fails
-        with no local fallback.
+        Raises RuntimeError if no local text encoder can be found.
         """
-        settings = self.state.app_settings.model_copy(deep=True)
-        api_available = bool(settings.ltx_api_key)
-        text_encoder_dir = resolve_model_path(self.models_dir, self.config.model_download_specs,"text_encoder")
-        local_available = text_encoder_dir.exists() and any(text_encoder_dir.iterdir())
+        del prompt, enhance_prompt
 
-        if not api_available and not local_available:
+        if not self._is_local_text_encoder_available():
             raise RuntimeError(
-                "TEXT_ENCODING_NOT_CONFIGURED: To generate videos, you need to configure text encoding. "
-                "Either enter an LTX API Key in Settings, or enable the Local Text Encoder."
+                "TEXT_ENCODER_MISSING: No text encoder found. "
+                "Download a text encoder from Settings → Model Downloads."
             )
 
-        use_local = self.should_use_local_encoding()
-        gemma_root = self.resolve_gemma_root()
-        embeddings = self._prepare_api_embeddings(prompt, enhance_prompt)
-
-        if not use_local and embeddings is None and gemma_root is None:
-            raise RuntimeError(
-                "LTX API text encoding failed and local text encoder is not available. "
-                "Please download the text encoder from Settings or check your API key."
-            )
+        self.clear_api_embeddings()
 
     def resolve_gemma_root(self) -> str | None:
-        if not self.should_use_local_encoding():
-            return None
-        text_encoder_dir = resolve_model_path(self.models_dir, self.config.model_download_specs,"text_encoder")
-        return str(text_encoder_dir)
+        """Return the gemma root directory for the text encoder.
 
-    def _prepare_api_embeddings(self, prompt: str, enhance_prompt: bool) -> TextEncodingResult | None:
-        if self.should_use_local_encoding():
-            self.clear_api_embeddings()
+        The gemma root must contain tokenizer.model and preprocessor_config.json.
+        If these files are missing, they are auto-downloaded from HuggingFace.
+        """
+        if not self._is_local_text_encoder_available():
             return None
 
-        settings = self.state.app_settings.model_copy(deep=True)
-        if not settings.ltx_api_key:
-            self.clear_api_embeddings()
-            return None
-
-        cached = self._get_cached_prompt(prompt, enhance_prompt)
-        if cached is not None:
-            self._set_api_embeddings(cached)
-            return cached
-
-        te = self.state.text_encoder
-        if te is None:
-            return None
-
-        encoded = te.service.encode_via_api(
-            prompt=prompt,
-            api_key=settings.ltx_api_key,
-            checkpoint_path=str(resolve_model_path(self.models_dir, self.config.model_download_specs,"checkpoint")),
-            enhance_prompt=enhance_prompt,
-        )
-        if encoded is not None:
-            self._cache_prompt(prompt, enhance_prompt, encoded)
-            self._set_api_embeddings(encoded)
-        return encoded
+        root = self._ensure_tokenizer_files()
+        if root is not None:
+            self._ensure_model_alias_for_builder(root)
+            return str(root)
+        return None

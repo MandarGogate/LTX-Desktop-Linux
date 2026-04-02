@@ -206,6 +206,7 @@ class DownloadHandler(StateHandlerBase):
         if spec.is_folder:
             if dst.exists():
                 shutil.rmtree(dst)
+            dst.parent.mkdir(parents=True, exist_ok=True)
             src.rename(dst)
         else:
             if dst.exists():
@@ -269,6 +270,7 @@ class DownloadHandler(StateHandlerBase):
                 raise
 
         self.finish_download()
+        self.cleanup_downloading_dir()
         self._models_handler.refresh_available_files()
 
     def start_model_download(self, model_types: set[ModelFileType]) -> str | None:
@@ -310,6 +312,7 @@ class DownloadHandler(StateHandlerBase):
                 self.cleanup_downloading_dir()
                 raise
             self.finish_download()
+            self.cleanup_downloading_dir()
             self._models_handler.refresh_available_files()
 
         self._task_runner.run_background(

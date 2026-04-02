@@ -258,6 +258,28 @@ class RequiredModelsResponse(BaseModel):
     modelTypes: list[ModelFileType]
 
 
+class SuggestedModel(BaseModel):
+    id: str
+    filename: str
+    repo_id: str
+    description: str
+    size_gb: float
+    target_subdir: str
+    quant_level: str | None = None
+    category: str  # "diffusion", "text_encoder", "upscaler"
+
+
+class ModelReadinessResponse(BaseModel):
+    can_generate: bool
+    has_diffusion_model: bool
+    has_text_encoder: bool
+    has_upscaler: bool
+    vram_gb: int | None
+    gpu_name: str | None
+    suggested_models: list[SuggestedModel]
+    total_download_gb: float
+
+
 class SuggestGapPromptRequest(BaseModel):
     beforePrompt: str = ""
     afterPrompt: str = ""

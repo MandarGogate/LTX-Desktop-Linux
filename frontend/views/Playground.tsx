@@ -9,6 +9,7 @@ import { SettingsPanel, type GenerationSettings } from '../components/SettingsPa
 import { ModeTabs, type GenerationMode } from '../components/ModeTabs'
 import { LtxLogo } from '../components/LtxLogo'
 import { ModelStatusDropdown } from '../components/ModelStatusDropdown'
+import { GpuStatsWidget } from '../components/GpuStatsWidget'
 import { Textarea } from '../components/ui/textarea'
 import { Button } from '../components/ui/button'
 import { useGeneration } from '../hooks/use-generation'
@@ -19,8 +20,11 @@ import { useProjects } from '../contexts/ProjectContext'
 import { useAppSettings } from '../contexts/AppSettingsContext'
 import { fileUrlToPath } from '../lib/url-to-path'
 import { sanitizeForcedApiVideoSettings } from '../lib/api-video-options'
+import { loadGenerationSettings, saveGenerationSettings } from '../lib/generation-settings-storage'
 import { RetakePanel } from '../components/RetakePanel'
 import { ICLoraPanel, CONDITIONING_TYPES, type ICLoraConditioningType } from '../components/ICLoraPanel'
+
+const PLAYGROUND_SETTINGS_STORAGE_KEY = 'ltx_playground_generation_settings'
 
 const DEFAULT_SETTINGS: GenerationSettings = {
   model: 'fast',
@@ -43,9 +47,9 @@ export function Playground() {
   const [prompt, setPrompt] = useState('')
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [selectedAudio, setSelectedAudio] = useState<string | null>(null)
-  const [settings, setSettings] = useState<GenerationSettings>(() => ({ ...DEFAULT_SETTINGS }))
+  const [settings, setSettings] = useState<GenerationSettings>(() => loadGenerationSettings(PLAYGROUND_SETTINGS_STORAGE_KEY, DEFAULT_SETTINGS))
 
-  const { status, processStatus } = useBackend()
+  const { processStatus } = useBackend()
 
   useEffect(() => {
     if (!shouldVideoGenerateWithLtxApi || mode === 'text-to-image') return
@@ -69,6 +73,10 @@ export function Playground() {
       })
     }
   }, [mode, selectedAudio, shouldVideoGenerateWithLtxApi]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    saveGenerationSettings(PLAYGROUND_SETTINGS_STORAGE_KEY, settings)
+  }, [settings])
 
   // Handle mode change
   const handleModeChange = (newMode: GenerationMode) => {
@@ -249,12 +257,8 @@ export function Playground() {
           {/* Model Status Dropdown */}
           {!forceApiGenerations && <ModelStatusDropdown />}
           
-          {/* GPU Info */}
-          {status.gpuInfo && (
-            <div className="text-sm text-zinc-500">
-              {status.gpuInfo.name} ({(status.gpuInfo.vramUsed / 1024).toFixed(1)}GB / {Math.round(status.gpuInfo.vram / 1024)}GB)
-            </div>
-          )}
+          {/* Live GPU Stats */}
+          <GpuStatsWidget />
         </div>
       </header>
 

@@ -10,6 +10,11 @@ export interface FastModelSettings {
   useUpscaler: boolean
 }
 
+export interface SelectedLoRASetting {
+  path: string
+  strength: number
+}
+
 export interface AppSettings {
   useTorchCompile: boolean
   loadOnStartup: boolean
@@ -20,12 +25,23 @@ export interface AppSettings {
   useLocalTextEncoder: boolean
   fastModel: FastModelSettings
   proModel: InferenceSettings
+  customModel: InferenceSettings
   promptCacheSize: number
   promptEnhancerEnabledT2V: boolean
   promptEnhancerEnabledI2V: boolean
   seedLocked: boolean
   lockedSeed: number
   modelsDir: string
+  projectAssetsDir: string
+  preferredModelPath: string
+  selectedLoras: SelectedLoRASetting[]
+  preferredGgufPath: string
+  preferredLoraPath: string
+  preferredLoraStrength: number
+  numBlocksToSwap: number
+  runMode: string
+  preferredZitModelPath: string
+  preferredTextEncoderPath: string
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -35,15 +51,26 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   userPrefersLtxApiVideoGenerations: false,
   hasFalApiKey: false,
   hasGeminiApiKey: false,
-  useLocalTextEncoder: false,
+  useLocalTextEncoder: true,
   fastModel: { useUpscaler: true },
-  proModel: { steps: 20, useUpscaler: true },
+  proModel: { steps: 30, useUpscaler: true },
+  customModel: { steps: 20, useUpscaler: true },
   promptCacheSize: 1,
   promptEnhancerEnabledT2V: false,
   promptEnhancerEnabledI2V: false,
   seedLocked: false,
   lockedSeed: 42,
   modelsDir: '',
+  projectAssetsDir: '',
+  preferredModelPath: '',
+  selectedLoras: [],
+  preferredGgufPath: '',
+  preferredLoraPath: '',
+  preferredLoraStrength: 0.8,
+  numBlocksToSwap: -1,
+  runMode: 'auto',
+  preferredZitModelPath: '',
+  preferredTextEncoderPath: '',
 }
 
 type BackendProcessStatus = 'alive' | 'restarting' | 'dead'
@@ -76,6 +103,12 @@ function toBackendProcessStatus(value: unknown): BackendProcessStatus | null {
 }
 
 function normalizeAppSettings(data: Partial<AppSettings>): AppSettings {
+  const migratedSelectedLoras = data.selectedLoras && data.selectedLoras.length > 0
+    ? data.selectedLoras
+    : data.preferredLoraPath
+      ? [{ path: data.preferredLoraPath, strength: data.preferredLoraStrength ?? DEFAULT_APP_SETTINGS.preferredLoraStrength }]
+      : DEFAULT_APP_SETTINGS.selectedLoras
+
   return {
     useTorchCompile: data.useTorchCompile ?? DEFAULT_APP_SETTINGS.useTorchCompile,
     loadOnStartup: data.loadOnStartup ?? DEFAULT_APP_SETTINGS.loadOnStartup,
@@ -83,15 +116,26 @@ function normalizeAppSettings(data: Partial<AppSettings>): AppSettings {
     userPrefersLtxApiVideoGenerations: data.userPrefersLtxApiVideoGenerations ?? DEFAULT_APP_SETTINGS.userPrefersLtxApiVideoGenerations,
     hasFalApiKey: data.hasFalApiKey ?? DEFAULT_APP_SETTINGS.hasFalApiKey,
     hasGeminiApiKey: data.hasGeminiApiKey ?? DEFAULT_APP_SETTINGS.hasGeminiApiKey,
-    useLocalTextEncoder: data.useLocalTextEncoder ?? DEFAULT_APP_SETTINGS.useLocalTextEncoder,
+    useLocalTextEncoder: true,
     fastModel: data.fastModel ?? DEFAULT_APP_SETTINGS.fastModel,
     proModel: data.proModel ?? DEFAULT_APP_SETTINGS.proModel,
+    customModel: data.customModel ?? DEFAULT_APP_SETTINGS.customModel,
     promptCacheSize: data.promptCacheSize ?? DEFAULT_APP_SETTINGS.promptCacheSize,
     promptEnhancerEnabledT2V: data.promptEnhancerEnabledT2V ?? DEFAULT_APP_SETTINGS.promptEnhancerEnabledT2V,
     promptEnhancerEnabledI2V: data.promptEnhancerEnabledI2V ?? DEFAULT_APP_SETTINGS.promptEnhancerEnabledI2V,
     seedLocked: data.seedLocked ?? DEFAULT_APP_SETTINGS.seedLocked,
     lockedSeed: data.lockedSeed ?? DEFAULT_APP_SETTINGS.lockedSeed,
     modelsDir: data.modelsDir ?? DEFAULT_APP_SETTINGS.modelsDir,
+    projectAssetsDir: data.projectAssetsDir ?? DEFAULT_APP_SETTINGS.projectAssetsDir,
+    preferredModelPath: data.preferredModelPath ?? data.preferredGgufPath ?? DEFAULT_APP_SETTINGS.preferredModelPath,
+    selectedLoras: migratedSelectedLoras,
+    preferredGgufPath: data.preferredGgufPath ?? DEFAULT_APP_SETTINGS.preferredGgufPath,
+    preferredLoraPath: data.preferredLoraPath ?? DEFAULT_APP_SETTINGS.preferredLoraPath,
+    preferredLoraStrength: data.preferredLoraStrength ?? DEFAULT_APP_SETTINGS.preferredLoraStrength,
+    numBlocksToSwap: data.numBlocksToSwap ?? DEFAULT_APP_SETTINGS.numBlocksToSwap,
+    runMode: data.runMode ?? DEFAULT_APP_SETTINGS.runMode,
+    preferredZitModelPath: data.preferredZitModelPath ?? DEFAULT_APP_SETTINGS.preferredZitModelPath,
+    preferredTextEncoderPath: data.preferredTextEncoderPath ?? DEFAULT_APP_SETTINGS.preferredTextEncoderPath,
   }
 }
 
@@ -99,7 +143,7 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS)
   const [isLoaded, setIsLoaded] = useState(false)
   const [runtimePolicyLoaded, setRuntimePolicyLoaded] = useState(false)
-  const [forceApiGenerations, setForceApiGenerations] = useState(true)
+  const [forceApiGenerations, setForceApiGenerations] = useState(false)
   const [backendProcessStatus, setBackendProcessStatus] = useState<BackendProcessStatus | null>(null)
 
   useEffect(() => {
@@ -125,8 +169,8 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
         }
       } catch {
         if (!cancelled) {
-          // Fail closed until policy can be read.
-          setForceApiGenerations(true)
+          // Local-first app: if runtime policy cannot be read, keep local generation enabled.
+          setForceApiGenerations(false)
         }
       } finally {
         if (!cancelled) {

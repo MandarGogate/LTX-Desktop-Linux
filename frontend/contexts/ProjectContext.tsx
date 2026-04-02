@@ -2,6 +2,8 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import type { Project, Asset, AssetTake, ViewType, ProjectTab, Timeline } from '../types/project'
 import { createDefaultTimeline } from '../types/project'
 import { logger } from '../lib/logger'
+import { toServableUrl } from '../lib/serve-url'
+import { registerUrlPath } from '../lib/url-path-registry'
 
 interface ProjectContextType {
   // Navigation
@@ -117,6 +119,46 @@ function isRealPath(p: string): boolean {
   return p.includes('/') || p.includes('\\') || /^[A-Za-z]:/.test(p)
 }
 
+function normalizeAssetUrls(asset: Asset): Asset {
+  const normalizedUrl = asset.url ? toServableUrl(asset.url) : asset.url
+  const normalizedThumbnail = asset.thumbnail ? toServableUrl(asset.thumbnail) : asset.thumbnail
+  registerUrlPath(normalizedUrl, asset.path)
+  if (normalizedThumbnail) registerUrlPath(normalizedThumbnail, asset.path)
+
+  return {
+    ...asset,
+    url: normalizedUrl,
+    thumbnail: normalizedThumbnail,
+    takes: asset.takes?.map(t => {
+      const takeUrl = t.url ? toServableUrl(t.url) : t.url
+      const takeThumbnail = t.thumbnail ? toServableUrl(t.thumbnail) : t.thumbnail
+      registerUrlPath(takeUrl, t.path)
+      if (takeThumbnail) registerUrlPath(takeThumbnail, t.path)
+      return {
+        ...t,
+        url: takeUrl,
+        thumbnail: takeThumbnail,
+      }
+    }),
+  }
+}
+
+function normalizeProjectUrls(project: Project): Project {
+  return {
+    ...project,
+    thumbnail: project.thumbnail ? toServableUrl(project.thumbnail) : project.thumbnail,
+    assets: project.assets.map(normalizeAssetUrls),
+    timelines: (project.timelines || []).map(timeline => ({
+      ...timeline,
+      clips: (timeline.clips || []).map(clip => ({
+        ...clip,
+        importedUrl: clip.importedUrl ? toServableUrl(clip.importedUrl) : clip.importedUrl,
+        asset: clip.asset ? normalizeAssetUrls(clip.asset) : clip.asset,
+      })),
+    })),
+  }
+}
+
 // Recover broken blob URLs by rebuilding file:// URLs from stored paths
 function recoverAssetUrls(project: Project): Project {
   let changed = false
@@ -157,8 +199,8 @@ function loadProjectsFromStorage(): Project[] {
     if (stored) {
       const parsed = JSON.parse(stored)
       if (Array.isArray(parsed)) {
-        // Migrate any old projects, then recover broken blob URLs
-        return parsed.map(migrateProject).map(recoverAssetUrls)
+        // Migrate old data, recover broken file URLs, and normalize media URLs for runtime.
+        return parsed.map(migrateProject).map(recoverAssetUrls).map(normalizeProjectUrls)
       }
     }
   } catch (e) {
@@ -232,11 +274,11 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const addAsset = useCallback((projectId: string, assetData: Omit<Asset, 'id' | 'createdAt'>): Asset => {
-    const newAsset: Asset = {
+    const newAsset: Asset = normalizeAssetUrls({
       ...assetData,
       id: `asset-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       createdAt: Date.now(),
-    }
+    })
     setProjects(prev => prev.map(p => 
       p.id === projectId 
         ? { 
@@ -264,7 +306,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         ? {
             ...p,
             assets: p.assets.map(a =>
-              a.id === assetId ? { ...a, ...updates } : a
+              a.id === assetId ? normalizeAssetUrls({ ...a, ...updates }) : a
             ),
             updatedAt: Date.now(),
           }
@@ -286,17 +328,22 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
             thumbnail: a.thumbnail,
             createdAt: a.createdAt,
           }]
-          const newTakes = [...existingTakes, take]
+          const normalizedTake: AssetTake = {
+            ...take,
+            url: take.url ? toServableUrl(take.url) : take.url,
+            thumbnail: take.thumbnail ? toServableUrl(take.thumbnail) : take.thumbnail,
+          }
+          const newTakes = [...existingTakes, normalizedTake]
           const newIndex = newTakes.length - 1
-          return {
+          return normalizeAssetUrls({
             ...a,
             takes: newTakes,
             activeTakeIndex: newIndex,
             // Update the main url/path to the new take
-            url: take.url,
-            path: take.path,
-            thumbnail: take.thumbnail || a.thumbnail,
-          }
+            url: normalizedTake.url,
+            path: normalizedTake.path,
+            thumbnail: normalizedTake.thumbnail || a.thumbnail,
+          })
         }),
         updatedAt: Date.now(),
       }
@@ -316,14 +363,14 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
           if (newActiveIdx >= newTakes.length) newActiveIdx = newTakes.length - 1
           if (newActiveIdx < 0) newActiveIdx = 0
           const activeTake = newTakes[newActiveIdx]
-          return {
+          return normalizeAssetUrls({
             ...a,
             takes: newTakes,
             activeTakeIndex: newActiveIdx,
             url: activeTake.url,
             path: activeTake.path,
             thumbnail: activeTake.thumbnail || a.thumbnail,
-          }
+          })
         }),
         updatedAt: Date.now(),
       }
@@ -339,13 +386,13 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
           if (a.id !== assetId || !a.takes) return a
           const idx = Math.max(0, Math.min(takeIndex, a.takes.length - 1))
           const take = a.takes[idx]
-          return {
+          return normalizeAssetUrls({
             ...a,
             activeTakeIndex: idx,
             url: take.url,
             path: take.path,
             thumbnail: take.thumbnail || a.thumbnail,
-          }
+          })
         }),
         updatedAt: Date.now(),
       }

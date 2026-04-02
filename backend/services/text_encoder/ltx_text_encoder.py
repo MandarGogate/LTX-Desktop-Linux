@@ -152,7 +152,7 @@ class LTXTextEncoder:
                     raise ValueError(missing_message)
                 model = builder.build(device=torch.device("cpu"), dtype=self_model_ledger.dtype)
                 model = _materialize_meta_module_on_cpu(model, label)
-                return model.eval()
+                return model.to(dtype=self_model_ledger.dtype).eval()
 
             def _build_transformer_safe(self_model_ledger: ModelLedger) -> torch.nn.Module:
                 if not hasattr(self_model_ledger, "transformer_builder"):
@@ -223,7 +223,11 @@ class LTXTextEncoder:
                         raise
 
                 _patch_gemma_forward_hidden_states_only(te_state.cached_encoder)
-                _quantize_linear_weights_fp8(te_state.cached_encoder)
+                # Skip FP8 quantization for GGUF text encoders — their layers
+                # already use quantized weights with custom forward methods.
+                # Applying FP8 on top corrupts GGUF dequantization logic.
+                if not getattr(te_state.cached_encoder, "_ltx_gguf_text_encoder", False):
+                    _quantize_linear_weights_fp8(te_state.cached_encoder)
                 return te_state.cached_encoder
 
             def patched_cleanup_memory() -> None:

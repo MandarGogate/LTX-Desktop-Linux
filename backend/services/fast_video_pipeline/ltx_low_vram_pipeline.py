@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     import torch
 
     from api_types import ImageConditioningInput
-    from services.block_swap.block_swap import BlockSwapTransformerWrapper
+    from services.block_swap.fast_block_swap import FastBlockSwapWrapper
     from services.gguf_loader.gguf_loader import GGUFModelLoader
     from services.vram_manager.vram_manager import VRAMManager
 
@@ -42,9 +42,81 @@ _DEV_SIGMA_VALUES_20: list[float] = [
 ]
 
 
+def _build_split_video_vae_sd_ops(kind: str) -> Any:
+    """Accept both monolithic and split-file key layouts for video VAE weights."""
+    from ltx_core.loader.sd_ops import SDOps
+
+    if kind not in {"encoder", "decoder"}:
+        raise ValueError(f"Unsupported split video VAE kind: {kind}")
+
+    base_prefix = f"{kind}."
+    nested_prefix = f"vae.{kind}."
+    return (
+        SDOps(f"SPLIT_VIDEO_VAE_{kind.upper()}_SD_OPS")
+        .with_matching(prefix=base_prefix)
+        .with_matching(prefix=nested_prefix)
+        .with_matching(prefix="per_channel_statistics.")
+        .with_matching(prefix="vae.per_channel_statistics.")
+        .with_replacement(nested_prefix, "")
+        .with_replacement(base_prefix, "")
+        .with_replacement("vae.per_channel_statistics.", "per_channel_statistics.")
+    )
+
+
 def _make_dev_sigmas(steps: int) -> list[float]:
-    """Create a linear sigma schedule for the non-distilled (dev) model."""
-    return [float(1.0 - i / steps) for i in range(steps + 1)]
+    """Create the correct sigma schedule for the non-distilled (dev) model.
+
+    Uses LTX2Scheduler which applies token-count-dependent shifting and
+    stretching. A simple linear schedule produces noise with dev models.
+    """
+    from ltx_pipelines.ti2vid_one_stage import LTX2Scheduler
+    scheduler = LTX2Scheduler()
+    sigmas = scheduler.execute(steps=steps)
+    return sigmas.tolist()
+
+
+def _get_official_dev_guidance_defaults() -> tuple[str, Any, Any]:
+    """Return the official LTX 2.3 dev negative prompt and guider params."""
+    from ltx_core.components.guiders import MultiModalGuiderParams
+
+    try:
+        from ltx_pipelines.utils.constants import DEFAULT_NEGATIVE_PROMPT, LTX_2_3_PARAMS
+
+        return (
+            DEFAULT_NEGATIVE_PROMPT,
+            LTX_2_3_PARAMS.video_guider_params,
+            LTX_2_3_PARAMS.audio_guider_params,
+        )
+    except Exception:
+        return (
+            "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, "
+            "grainy texture, poor lighting, flickering, motion blur, distorted proportions, unnatural skin tones, "
+            "deformed facial features, asymmetrical face, missing facial features, extra limbs, disfigured hands, "
+            "wrong hand count, artifacts around text, inconsistent perspective, camera shake, incorrect depth of "
+            "field, background too sharp, background clutter, distracting reflections, harsh shadows, inconsistent "
+            "lighting direction, color banding, cartoonish rendering, 3D CGI look, unrealistic materials, uncanny "
+            "valley effect, incorrect ethnicity, wrong gender, exaggerated expressions, wrong gaze direction, "
+            "mismatched lip sync, silent or muted audio, distorted voice, robotic voice, echo, background noise, "
+            "off-sync audio, incorrect dialogue, added dialogue, repetitive speech, jittery movement, awkward "
+            "pauses, incorrect timing, unnatural transitions, inconsistent framing, tilted camera, flat lighting, "
+            "inconsistent tone, cinematic oversaturation, stylized filters, or AI artifacts.",
+            MultiModalGuiderParams(
+                cfg_scale=3.0,
+                stg_scale=1.0,
+                rescale_scale=0.7,
+                modality_scale=3.0,
+                skip_step=0,
+                stg_blocks=[28],
+            ),
+            MultiModalGuiderParams(
+                cfg_scale=7.0,
+                stg_scale=1.0,
+                rescale_scale=0.7,
+                modality_scale=3.0,
+                skip_step=0,
+                stg_blocks=[28],
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +182,12 @@ def install_sage_attention() -> bool:
                     use_sdpa = True
 
                 if use_sdpa:
+                    # Cast to common dtype to prevent SDPA dtype mismatch errors
+                    # (GGUF models can produce mixed bfloat16/float32 tensors)
+                    if q.dtype != k.dtype or k.dtype != v.dtype:
+                        common_dtype = q.dtype
+                        k = k.to(common_dtype)
+                        v = v.to(common_dtype)
                     if mask is not None:
                         if mask.ndim == 2:
                             mask = mask.unsqueeze(0)
@@ -170,6 +248,7 @@ class LTXLowVRAMPipeline:
         use_sage_attention: bool = True,
         num_inference_steps: int | None = None,
         text_encoder_variant_path: str | None = None,
+        use_upscaler: bool = False,
     ) -> "LTXLowVRAMPipeline":
         return LTXLowVRAMPipeline(
             checkpoint_path=checkpoint_path,
@@ -184,6 +263,7 @@ class LTXLowVRAMPipeline:
             use_sage_attention=use_sage_attention,
             num_inference_steps=num_inference_steps,
             text_encoder_variant_path=text_encoder_variant_path,
+            use_upscaler=use_upscaler,
         )
 
     def __init__(
@@ -201,6 +281,7 @@ class LTXLowVRAMPipeline:
         use_sage_attention: bool = True,
         num_inference_steps: int | None = None,
         text_encoder_variant_path: str | None = None,
+        use_upscaler: bool = False,
     ) -> None:
         import torch as _torch
 
@@ -218,6 +299,7 @@ class LTXLowVRAMPipeline:
         self._extra_loras = extra_loras or []
         self._num_inference_steps = num_inference_steps
         self._text_encoder_variant_path = text_encoder_variant_path
+        self._use_upscaler = use_upscaler
 
         # Create default VRAMManager if not provided
         if vram_manager is None:
@@ -230,7 +312,8 @@ class LTXLowVRAMPipeline:
             vram_manager = VRAMManager(device, vram_gb)
 
         self.vram_manager = vram_manager
-        self._block_swap_wrapper: BlockSwapTransformerWrapper | None = None
+        self._block_swap_wrapper: FastBlockSwapWrapper | None = None
+        self._te_block_swap_wrapper: FastBlockSwapWrapper | None = None
         self._use_gguf = False
 
         # Cached model references — avoid reloading from disk each generation
@@ -240,6 +323,7 @@ class LTXLowVRAMPipeline:
         self._cached_audio_decoder: Any = None
         self._cached_vocoder: Any = None
         self._cached_video_encoder: Any = None
+        self._cached_spatial_upsampler: Any = None
 
         # Install SageAttention if requested
         if use_sage_attention:
@@ -267,41 +351,192 @@ class LTXLowVRAMPipeline:
         from ltx_pipelines.utils import ModelLedger
         from ltx_pipelines.utils.types import PipelineComponents
 
-        # Always use FP8 for the transformer when supported
+        # GGUF is already quantized. Applying the FP8 builder transforms on top
+        # can corrupt the loaded transformer and produce garbage/noisy output.
+        # Keep FP8 only for safetensors checkpoints.
         quantization = None
-        if device_supports_fp8(self.device):
+        if device_supports_fp8(self.device) and not self._use_gguf:
             from ltx_core.quantization import QuantizationPolicy
 
             quantization = QuantizationPolicy.fp8_cast()
             logger.info("FP8 quantization enabled")
+        elif self._use_gguf:
+            logger.info("Skipping FP8 quantization for GGUF transformer")
 
         # Build LoRA list from primary + extras.
         # Note: LoRAs must be compatible with the model architecture.
         # The LTX 2.3 (22B) model uses LoRAs trained for 22B dimensions,
         # while LTX 2.0 (19B) LoRAs have different tensor sizes and will fail.
+        #
+        # IMPORTANT: Only pre-fuse LoRAs for safetensors mode. For GGUF mode,
+        # LoRAs are applied at inference time via forward hooks in
+        # _install_lora_hooks(). Passing them to ModelLedger would corrupt
+        # the transformer builder's module_ops, causing the GGUF weights to
+        # be loaded into a LoRA-modified skeleton → noise/garbage output.
         loras = None
-        all_lora_entries = self._collect_loras()
-        if all_lora_entries:
-            loras = all_lora_entries
-            for l in all_lora_entries:
-                logger.info("LoRA: %s (strength=%.2f)", l.path, l.strength)
+        if not self._use_gguf:
+            all_lora_entries = self._collect_loras()
+            if all_lora_entries:
+                loras = all_lora_entries
+                for l in all_lora_entries:
+                    logger.info("LoRA: %s (strength=%.2f)", l.path, l.strength)
 
         self.model_ledger = ModelLedger(
             dtype=self.dtype,
             device=self._torch.device("cpu"),
             checkpoint_path=self._checkpoint_path,
             gemma_root_path=self._gemma_root,
+            spatial_upsampler_path=self._upsampler_path,
             loras=loras,
             quantization=quantization,
         )
+        self._maybe_configure_split_component_builders()
 
-        # Optional override for a pre-quantized text encoder safetensors.
-        # We still use the base gemma root for tokenizer + processor config,
-        # but swap the model weight file used by the text encoder builder.
+        # Optional override for a quantized text encoder variant.
+        # We still use the base gemma root for tokenizer + processor config.
         if self._text_encoder_variant_path and self._gemma_root and Path(self._text_encoder_variant_path).exists():
             try:
-                from ltx_core.loader.registry import DummyRegistry
-                from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder as Builder
+                variant_path = str(Path(self._text_encoder_variant_path))
+                if not hasattr(self.model_ledger, "_default_text_encoder_builder"):
+                    setattr(
+                        self.model_ledger,
+                        "_default_text_encoder_builder",
+                        self.model_ledger.text_encoder_builder,
+                    )
+                if variant_path.lower().endswith(".gguf"):
+                    from services.text_encoder.gguf_text_encoder_builder import (
+                        GGUFGemmaTextEncoderBuilder,
+                    )
+
+                    self.model_ledger.text_encoder_builder = GGUFGemmaTextEncoderBuilder(
+                        base_builder=self.model_ledger.text_encoder_builder,
+                        checkpoint_path=getattr(self.model_ledger.text_encoder_builder, "model_path", str(self._checkpoint_path)),
+                        gguf_path=variant_path,
+                    )
+                else:
+                    from ltx_core.loader.registry import DummyRegistry
+                    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder as Builder
+                    from ltx_core.text_encoders.gemma import (
+                        AV_GEMMA_TEXT_ENCODER_KEY_OPS,
+                        GEMMA_MODEL_OPS,
+                        GemmaTextEncoderConfigurator,
+                        module_ops_from_gemma_root,
+                    )
+
+                    variant_model_path: tuple[str, ...]
+                    variant_path_obj = Path(variant_path)
+                    if variant_path_obj.is_dir():
+                        shard_paths = sorted(str(path) for path in variant_path_obj.glob("model-*.safetensors"))
+                        if not shard_paths:
+                            raise ValueError(
+                                f"Text encoder variant directory contains no model shards: {variant_path}"
+                            )
+                        variant_model_path = (str(self._checkpoint_path), *shard_paths)
+                        logger.info(
+                            "Using sharded text encoder variant directory: %s (%d shards)",
+                            variant_path,
+                            len(shard_paths),
+                        )
+                    else:
+                        variant_model_path = (str(self._checkpoint_path), variant_path)
+
+                    module_ops = module_ops_from_gemma_root(self._gemma_root)
+                    self.model_ledger.text_encoder_builder = Builder(
+                        model_path=variant_model_path,
+                        model_class_configurator=GemmaTextEncoderConfigurator,
+                        model_sd_ops=AV_GEMMA_TEXT_ENCODER_KEY_OPS,
+                        registry=DummyRegistry(),
+                        module_ops=(GEMMA_MODEL_OPS, *module_ops),
+                    )
+                    logger.info("Using text encoder variant: %s", variant_path)
+            except Exception as exc:
+                logger.warning("Failed to configure text encoder variant %s: %s", self._text_encoder_variant_path, exc)
+
+        self.pipeline_components = PipelineComponents(
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+    def _maybe_configure_split_component_builders(self) -> None:
+        """Use split LTX component files when the checkpoint is transformer-only."""
+        checkpoint_path = Path(self._checkpoint_path)
+        if not checkpoint_path.exists():
+            return
+        if checkpoint_path.suffix.lower() != ".safetensors":
+            return
+        if checkpoint_path.stat().st_size > 10_000_000_000:
+            return
+
+        models_dir = checkpoint_path.parent.parent
+        video_candidates = (
+            models_dir / "vae" / "LTX23_video_vae_bf16.safetensors",
+            models_dir / "vae" / "LTX2_video_vae_bf16.safetensors",
+        )
+        audio_candidates = (
+            models_dir / "vae" / "LTX23_audio_vae_bf16.safetensors",
+            models_dir / "vae" / "LTX2_audio_vae_bf16.safetensors",
+        )
+        text_projection_candidates = (
+            models_dir / "text_encoders" / "ltx-2.3_text_projection_bf16.safetensors",
+            models_dir / "text_encoders" / "ltx-2-19b-embeddings_connector_dev_bf16.safetensors",
+        )
+
+        video_split = next((path for path in video_candidates if path.exists()), None)
+        audio_split = next((path for path in audio_candidates if path.exists()), None)
+        text_projection = next((path for path in text_projection_candidates if path.exists()), None)
+        if video_split is None or audio_split is None:
+            return
+
+        from ltx_core.loader.registry import DummyRegistry
+        from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder as Builder
+        from ltx_core.model.audio_vae.model_configurator import (
+            AUDIO_VAE_DECODER_COMFY_KEYS_FILTER,
+            AUDIO_VAE_ENCODER_COMFY_KEYS_FILTER,
+            AudioDecoderConfigurator,
+            AudioEncoderConfigurator,
+            VOCODER_COMFY_KEYS_FILTER,
+            VocoderConfigurator,
+        )
+        from ltx_core.model.video_vae.model_configurator import (
+            VideoDecoderConfigurator,
+            VideoEncoderConfigurator,
+        )
+
+        registry = getattr(self.model_ledger, "registry", DummyRegistry())
+        self.model_ledger.vae_decoder_builder = Builder(
+            model_path=str(video_split),
+            model_class_configurator=VideoDecoderConfigurator,
+            model_sd_ops=_build_split_video_vae_sd_ops("decoder"),
+            registry=registry,
+        )
+        self.model_ledger.vae_encoder_builder = Builder(
+            model_path=str(video_split),
+            model_class_configurator=VideoEncoderConfigurator,
+            model_sd_ops=_build_split_video_vae_sd_ops("encoder"),
+            registry=registry,
+        )
+        self.model_ledger.audio_encoder_builder = Builder(
+            model_path=str(audio_split),
+            model_class_configurator=AudioEncoderConfigurator,
+            model_sd_ops=AUDIO_VAE_ENCODER_COMFY_KEYS_FILTER,
+            registry=registry,
+        )
+        self.model_ledger.audio_decoder_builder = Builder(
+            model_path=str(audio_split),
+            model_class_configurator=AudioDecoderConfigurator,
+            model_sd_ops=AUDIO_VAE_DECODER_COMFY_KEYS_FILTER,
+            registry=registry,
+        )
+        self.model_ledger.vocoder_builder = Builder(
+            model_path=str(audio_split),
+            model_class_configurator=VocoderConfigurator,
+            model_sd_ops=VOCODER_COMFY_KEYS_FILTER,
+            registry=registry,
+        )
+
+        if text_projection is not None and self._gemma_root:
+            try:
+                from ltx_core.loader.registry import DummyRegistry as _DummyRegistry
                 from ltx_core.text_encoders.gemma import (
                     AV_GEMMA_TEXT_ENCODER_KEY_OPS,
                     GEMMA_MODEL_OPS,
@@ -309,28 +544,24 @@ class LTXLowVRAMPipeline:
                     module_ops_from_gemma_root,
                 )
 
-                variant_path = str(Path(self._text_encoder_variant_path))
+                model_folder = next(path.parent for path in Path(self._gemma_root).rglob("model*.safetensors"))
+                weight_paths = [str(path) for path in model_folder.rglob("*.safetensors")]
                 module_ops = module_ops_from_gemma_root(self._gemma_root)
-                if not hasattr(self.model_ledger, "_default_text_encoder_builder"):
-                    setattr(
-                        self.model_ledger,
-                        "_default_text_encoder_builder",
-                        self.model_ledger.text_encoder_builder,
-                    )
                 self.model_ledger.text_encoder_builder = Builder(
-                    model_path=(str(self._checkpoint_path), variant_path),
+                    model_path=(str(text_projection), *weight_paths),
                     model_class_configurator=GemmaTextEncoderConfigurator,
                     model_sd_ops=AV_GEMMA_TEXT_ENCODER_KEY_OPS,
-                    registry=DummyRegistry(),
+                    registry=_DummyRegistry(),
                     module_ops=(GEMMA_MODEL_OPS, *module_ops),
                 )
-                logger.info("Using text encoder variant: %s", variant_path)
-            except Exception as exc:
-                logger.warning("Failed to configure text encoder variant %s: %s", self._text_encoder_variant_path, exc)
+            except Exception:
+                logger.warning("Failed to configure split text projection builder", exc_info=True)
 
-        self.pipeline_components = PipelineComponents(
-            dtype=self.dtype,
-            device=self.device,
+        logger.warning(
+            "Using split LTX component weights with transformer-only checkpoint: video=%s audio=%s text_projection=%s",
+            video_split,
+            audio_split,
+            text_projection,
         )
 
     def _collect_loras(self) -> list[Any] | None:
@@ -359,8 +590,12 @@ class LTXLowVRAMPipeline:
     # ------------------------------------------------------------------
 
     def _setup_block_swap_if_needed(self, transformer: torch.nn.Module) -> torch.nn.Module:
-        """Wrap transformer with block swap if strategy requires it."""
-        from services.block_swap.block_swap import BlockSwapTransformerWrapper
+        """Wrap transformer with block swap if strategy requires it.
+
+        Reuses the existing wrapper if available to avoid accumulating
+        duplicate forward hooks on every generation call.
+        """
+        from services.block_swap.fast_block_swap import FastBlockSwapWrapper
         from services.vram_manager.vram_manager import OffloadStrategy
 
         if self.vram_manager.offload_strategy not in (
@@ -369,14 +604,20 @@ class LTXLowVRAMPipeline:
         ):
             return transformer
 
+        # Reuse existing wrapper — hooks are already installed on the modules
+        if self._block_swap_wrapper is not None:
+            self._block_swap_wrapper.restore_gpu_blocks()
+            logger.info("Reusing existing block swap wrapper")
+            return transformer
+
         blocks_on_gpu = self.vram_manager.block_swap_keep_on_gpu
         logger.info("Setting up block swap: keeping %d blocks on GPU", blocks_on_gpu)
 
-        self._block_swap_wrapper = BlockSwapTransformerWrapper(
+        self._block_swap_wrapper = FastBlockSwapWrapper(
             transformer=transformer,
             device=self.device,
             blocks_to_keep_on_gpu=blocks_on_gpu,
-            use_async_prefetch=True,
+            prefetch_distance=2,
         )
 
         if self._block_swap_wrapper.block_count == 0:
@@ -389,24 +630,33 @@ class LTXLowVRAMPipeline:
         """Load transformer from GGUF file instead of safetensors.
 
         We can't rely on ``ModelLedger.transformer()`` here because the checkpoint
-        shim used for GGUF mode may yield a meta-backed model that fails on
-        ``.to(device)``. Build the architecture safely on CPU, materialize any
+        shim used for GGUF mode may not have transformer config metadata at all.
+        Build the architecture from the GGUF's embedded config, materialize any
         meta tensors with ``to_empty()``, then load the GGUF state dict.
         """
         if self._gguf_path is None:
             raise RuntimeError("No GGUF path configured")
 
+        import time as _time
         import torch
         from dataclasses import replace
         from ltx_core.loader import SDOps
         from ltx_core.model.transformer import X0Model
-        from services.gguf_loader.gguf_loader import GGUFModelLoader
+        from services.gguf_loader.gguf_lazy_loader import (
+            assign_gguf_linear_weights,
+            load_gguf_lazy_state_dict,
+            remap_gguf_keys,
+            replace_linear_with_gguf,
+        )
 
         logger.info("Loading GGUF transformer from %s", self._gguf_path)
-        state_dict = GGUFModelLoader.load_gguf_sd_for_diffusers(
-            Path(self._gguf_path),
+        t_load = _time.perf_counter()
+        state_dict = load_gguf_lazy_state_dict(
+            self._gguf_path,
             device="cpu",
         )
+        state_dict = remap_gguf_keys(state_dict)
+        logger.info("GGUF state dict loaded lazily in %.2fs", _time.perf_counter() - t_load)
 
         builder = self.model_ledger.transformer_builder
         if self.model_ledger.quantization is not None:
@@ -422,23 +672,172 @@ class LTXLowVRAMPipeline:
                 model_sd_ops=sd_ops,
             )
 
-        base_model = builder.build(device=torch.device("cpu"))
-        has_meta = any(
-            str(t.device) == "meta"
-            for t in list(base_model.parameters()) + list(base_model.buffers())
-        )
-        if has_meta:
-            logger.info("GGUF transformer base model has meta tensors, materializing with to_empty()")
-            base_model = base_model.to_empty(device=torch.device("cpu"))
+        config = builder.model_config()
+        base_model = builder.meta_model(config, builder.module_ops)
+        replace_linear_with_gguf(base_model, state_dict, compute_dtype=self.dtype)
+        base_model, remaining_state_dict = assign_gguf_linear_weights(base_model, state_dict)
+        base_model.load_state_dict(remaining_state_dict, strict=False, assign=True)
+
+        # Cast all non-GGUF parameters (norms, biases, embeddings) to the
+        # pipeline compute dtype.  Without this, norm layers stay in float32
+        # (the GGUF default for non-quantized tensors) while GGUF linears
+        # compute in bfloat16, causing dtype mismatches in attention.
+        from services.gguf_loader.gguf_lazy_loader import GGUFParameter
+        for param in base_model.parameters():
+            if isinstance(param, GGUFParameter):
+                continue  # Skip quantized GGUF weights
+            if param.dtype != self.dtype and param.dtype.is_floating_point:
+                param.data = param.data.to(self.dtype)
+        for buf in base_model.buffers():
+            if buf.dtype.is_floating_point and buf.dtype != self.dtype:
+                buf.data = buf.data.to(self.dtype)
 
         transformer = X0Model(base_model).eval()
-        try:
-            transformer.load_state_dict(state_dict, strict=False)
-        except Exception as e:
-            logger.warning("GGUF state dict load had issues: %s", e)
+
+        # Install LoRA hooks for GGUF mode — LoRAs can't be pre-fused into
+        # GGUF weights, so we apply them at inference time via forward hooks.
+        # Skip LoRA when the GGUF is already a distilled model (applying the
+        # distilled LoRA on top of an already-distilled model corrupts output).
+        gguf_name = Path(self._gguf_path).name.lower()
+        gguf_is_distilled = "distilled" in gguf_name
+        if gguf_is_distilled and self._lora_path and "distilled" in Path(self._lora_path).name.lower():
+            logger.info("Skipping distilled LoRA — GGUF model is already distilled: %s", gguf_name)
+        else:
+            self._install_lora_hooks(transformer)
 
         logger.info("GGUF transformer loaded successfully")
         return transformer
+
+    # ------------------------------------------------------------------
+    # LoRA hooks for GGUF mode (apply at inference, not pre-fuse)
+    # ------------------------------------------------------------------
+
+    def _install_lora_hooks(self, transformer: Any) -> None:
+        """Install inference-time LoRA hooks on the transformer.
+
+        Instead of pre-fusing LoRA into weights (which requires dequant + fuse + requant),
+        we apply LoRA as: output += (input @ A) @ B * strength during forward.
+
+        Guards against duplicate installation when the transformer is cached.
+        """
+        import torch as _torch
+
+        # Guard against duplicate hook installation on cached transformer
+        if getattr(transformer, '_lora_hooks_installed', False):
+            logger.info("LoRA hooks already installed on cached transformer — skipping")
+            return
+
+        lora_entries = self._collect_loras()
+        if not lora_entries:
+            return
+
+        import safetensors
+
+        for lora_entry in lora_entries:
+            lora_path = lora_entry.path
+            lora_strength = lora_entry.strength
+
+            if lora_strength == 0:
+                continue
+
+            import time as _time
+            t0 = _time.perf_counter()
+
+            # Load LoRA state dict
+            lora_sd: dict[str, _torch.Tensor] = {}
+            with safetensors.safe_open(lora_path, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    mapped_key = key
+                    if "diffusion_model." in mapped_key:
+                        mapped_key = mapped_key.replace("diffusion_model.", "")
+                    lora_sd[mapped_key] = f.get_tensor(key)
+
+            # Find A/B pairs and install hooks
+            hook_count = 0
+            pairs: dict[str, dict[str, _torch.Tensor]] = {}
+            for key, tensor in lora_sd.items():
+                if ".lora_A.weight" in key:
+                    base = key.replace(".lora_A.weight", "")
+                    pairs.setdefault(base, {})["A"] = tensor
+                elif ".lora_B.weight" in key:
+                    base = key.replace(".lora_B.weight", "")
+                    pairs.setdefault(base, {})["B"] = tensor
+
+            inner_model = transformer
+            for attr in ("velocity_model", "model", "inner_model"):
+                sub = getattr(inner_model, attr, None)
+                if sub is not None:
+                    inner_model = sub
+                    break
+
+            for base_key, ab in pairs.items():
+                if "A" not in ab or "B" not in ab:
+                    continue
+
+                # Find the target module
+                parts = base_key.split(".")
+                module = inner_model
+                found = True
+                for part in parts[:-1]:
+                    module = getattr(module, part, None)
+                    if module is None:
+                        found = False
+                        break
+                if not found or module is None:
+                    continue
+
+                target_name = parts[-1]
+                target = getattr(module, target_name, None)
+                if target is None or not isinstance(target, _torch.nn.Module):
+                    continue
+
+                lora_A = ab["A"].to(dtype=self.dtype)
+                lora_B = ab["B"].to(dtype=self.dtype)
+                strength = lora_strength
+
+                def make_hook(A: _torch.Tensor, B: _torch.Tensor, s: float) -> Any:
+                    def hook(mod: Any, inp: Any, out: _torch.Tensor) -> _torch.Tensor:
+                        x = inp[0] if isinstance(inp, tuple) else inp
+                        # LoRA: out += (x @ A^T) @ B^T * strength
+                        device = out.device
+                        a = A.to(device)
+                        b = B.to(device)
+                        lora_out = (x.to(self.dtype) @ a.T) @ b.T * s
+                        return out + lora_out.to(out.dtype)
+                    return hook
+
+                target.register_forward_hook(make_hook(lora_A, lora_B, strength))
+                hook_count += 1
+
+            logger.info(
+                "LoRA hooks installed: %s (%d hooks, strength=%.2f) in %.2fs",
+                Path(lora_path).name, hook_count, lora_strength,
+                _time.perf_counter() - t0,
+            )
+
+        transformer._lora_hooks_installed = True  # type: ignore[attr-defined]
+
+    def _is_distilled_mode(self) -> bool:
+        """Return True if the current configuration should use distilled denoising.
+
+        Distilled mode means:
+        - The base model is a distilled checkpoint/GGUF, OR
+        - A distilled LoRA is loaded on top of a dev model.
+
+        In distilled mode, guidance is baked into the model and no CFG is needed.
+        In dev mode, classifier-free guidance (CFG) must be applied explicitly.
+        """
+        is_distilled = "distilled" in self._checkpoint_path.lower()
+        if self._gguf_path and "distilled" in self._gguf_path.lower():
+            is_distilled = True
+        if self._lora_path and "distilled" in self._lora_path.lower():
+            is_distilled = True
+        if self._gguf_path and "dev" in self._gguf_path.lower():
+            if self._lora_path and "distilled" in self._lora_path.lower():
+                is_distilled = True
+            else:
+                is_distilled = False
+        return is_distilled
 
     # ------------------------------------------------------------------
     # Sigma schedule
@@ -453,9 +852,13 @@ class LTXLowVRAMPipeline:
         """
         from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES
 
-        # Heuristic: if a distilled LoRA is loaded, or the checkpoint name
-        # contains 'distilled', use the 8-step distilled schedule.
+        # Heuristic: if a distilled GGUF/LoRA/checkpoint is selected, use the
+        # distilled sigma table by default. Distilled runs should not silently
+        # fall back to the dev linear schedule just because settings happen to
+        # store an explicit step count of 8.
         is_distilled = "distilled" in self._checkpoint_path.lower()
+        if self._gguf_path and "distilled" in self._gguf_path.lower():
+            is_distilled = True
         if self._lora_path and "distilled" in self._lora_path.lower():
             is_distilled = True
 
@@ -467,10 +870,16 @@ class LTXLowVRAMPipeline:
             else:
                 is_distilled = False
 
-        if is_distilled and self._num_inference_steps is None:
+        distilled_default_steps = len(DISTILLED_SIGMA_VALUES) - 1
+        if is_distilled:
+            # Distilled models MUST use the distilled sigma schedule. Using a
+            # linear dev schedule with a distilled model produces noise. The
+            # number of steps is fixed by the distilled training and cannot be
+            # overridden by the user's step-count setting.
+            logger.info("Using %d-step distilled sigma schedule", distilled_default_steps)
             return list(DISTILLED_SIGMA_VALUES)
 
-        # Non-distilled or custom step count
+        # Non-distilled (dev) model — use configurable step count
         steps = self._num_inference_steps or 20
         schedule = _make_dev_sigmas(steps)
         logger.info("Using %d-step linear sigma schedule (dev/non-distilled)", steps)
@@ -491,6 +900,7 @@ class LTXLowVRAMPipeline:
         images: list[Any],
         output_path: str,
         progress_callback: Any = None,
+        negative_prompt: str = "",
     ) -> None:
         import torch
 
@@ -505,6 +915,7 @@ class LTXLowVRAMPipeline:
                 images=images,
                 output_path=output_path,
                 progress_callback=progress_callback,
+                negative_prompt=negative_prompt,
             )
 
     def _generate_impl(
@@ -518,22 +929,27 @@ class LTXLowVRAMPipeline:
         images: list[Any],
         output_path: str,
         progress_callback: Any = None,
+        negative_prompt: str = "",
     ) -> None:
         import torch
 
         from ltx_core.components.diffusion_steps import EulerDiffusionStep
         from ltx_core.components.noisers import GaussianNoiser
         from ltx_core.model.audio_vae import decode_audio as vae_decode_audio
+        from ltx_core.model.upsampler import upsample_video
         from ltx_core.model.video_vae import decode_video as vae_decode_video
         from ltx_core.text_encoders.gemma import encode_text
         from ltx_core.types import VideoPixelShape
+        from ltx_pipelines.utils.constants import STAGE_2_DISTILLED_SIGMA_VALUES
         from ltx_pipelines.utils.args import ImageConditioningInput as _LtxImageInput
         from ltx_pipelines.utils.helpers import (
             cleanup_memory,
             denoise_audio_video,
             image_conditionings_by_replacing_latent,
+            multi_modal_guider_factory_denoising_func,
             simple_denoising_func,
         )
+        from ltx_core.components.guiders import MultiModalGuiderFactory, MultiModalGuiderParams
         from ltx_pipelines.utils.samplers import euler_denoising_loop
 
         from services.ltx_pipeline_common import encode_video_output, video_chunks_number
@@ -557,13 +973,16 @@ class LTXLowVRAMPipeline:
         if self._cached_text_encoder is None:
             logger.info("[low-vram] Loading text encoder from disk (first run)")
             text_encoder = self.model_ledger.text_encoder()
-            self._quantize_text_encoder_fp8(text_encoder)
+            if not getattr(text_encoder, "_ltx_gguf_text_encoder", False):
+                self._quantize_text_encoder_fp8(text_encoder)
+            else:
+                logger.info("Skipping FP8 quantization for GGUF text encoder")
             self._cached_text_encoder = text_encoder
         else:
             logger.info("[low-vram] Using cached text encoder")
             text_encoder = self._cached_text_encoder
 
-        te_block_swap = self._setup_text_encoder_block_swap(text_encoder)
+        te_block_swap = self._setup_text_encoder_block_swap_cached(text_encoder)
         if te_block_swap is None:
             # Without block swapping, a cached encoder may have been fully offloaded
             # after the previous run. Move the whole module back before encoding.
@@ -575,30 +994,69 @@ class LTXLowVRAMPipeline:
         gemma = getattr(text_encoder, "model", None)
         if gemma is not None:
             _device = self.device
+            # Avoid re-wrapping the class on every generation (would create
+            # an ever-deepening class hierarchy). Only patch once.
+            if not getattr(gemma, "_device_override_applied", False):
+                class _DeviceOverride(type(gemma)):  # type: ignore[misc]
+                    @property
+                    def device(self_inner: Any) -> Any:  # type: ignore[override]
+                        return _device
 
-            class _DeviceOverride(type(gemma)):  # type: ignore[misc]
-                @property
-                def device(self_inner: Any) -> Any:  # type: ignore[override]
-                    return _device
-
-            gemma.__class__ = _DeviceOverride  # type: ignore[assignment]
+                gemma.__class__ = _DeviceOverride  # type: ignore[assignment]
+                gemma._device_override_applied = True  # type: ignore[attr-defined]
 
         context_p = encode_text(text_encoder, prompts=[prompt])[0]
         video_context, audio_context = self._normalize_text_contexts(*context_p)
+        logger.info(
+            "[low-vram] Text encoding result: video_context shape=%s dtype=%s "
+            "mean=%.6f std=%.6f min=%.6f max=%.6f device=%s",
+            video_context.shape, video_context.dtype,
+            video_context.float().mean().item(), video_context.float().std().item(),
+            video_context.float().min().item(), video_context.float().max().item(),
+            video_context.device,
+        )
+
+        # Dev (non-distilled) models need the official LTX 2.3 CFG/STG setup.
+        use_cfg = not self._is_distilled_mode()
+        neg_video_context: torch.Tensor | None = None
+        neg_audio_context: torch.Tensor | None = None
+        dev_negative_prompt, video_guider_defaults, audio_guider_defaults = _get_official_dev_guidance_defaults()
+        if use_cfg:
+            resolved_negative_prompt = negative_prompt.strip() or dev_negative_prompt
+            neg_context_p = encode_text(text_encoder, prompts=[resolved_negative_prompt])[0]
+            neg_video_context, neg_audio_context = self._normalize_text_contexts(*neg_context_p)
+            logger.info(
+                "[low-vram] Dev mode: encoded official negative prompt for CFG/STG "
+                "(cfg=%.2f stg=%.2f stg_blocks=%s)",
+                video_guider_defaults.cfg_scale,
+                video_guider_defaults.stg_scale,
+                list(video_guider_defaults.stg_blocks),
+            )
 
         # Offload text encoder to CPU (keep cached reference)
         if te_block_swap is not None:
             te_block_swap.offload_all()
-        text_encoder.to("cpu")
+        else:
+            text_encoder.to("cpu")
         self.vram_manager.cleanup()
+        self._log_vram_usage("after Phase 1")
         logger.info("[low-vram] Phase 1 done: %.2fs", _time.perf_counter() - t_phase1)
 
         # ============================================================
         # Phase 2: Image conditioning (if i2v)
         # ============================================================
-        output_shape = VideoPixelShape(
+        target_output_shape = VideoPixelShape(
             batch=1, frames=num_frames, width=width, height=height, fps=frame_rate,
         )
+        stage_1_output_shape = target_output_shape
+        if self._use_upscaler:
+            stage_1_output_shape = VideoPixelShape(
+                batch=1,
+                frames=num_frames,
+                width=width // 2,
+                height=height // 2,
+                fps=frame_rate,
+            )
 
         conditionings: list[Any] = []
         if images:
@@ -614,8 +1072,8 @@ class LTXLowVRAMPipeline:
             ltx_images = [_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images]
             conditionings = image_conditionings_by_replacing_latent(
                 images=ltx_images,
-                height=output_shape.height,
-                width=output_shape.width,
+                height=stage_1_output_shape.height,
+                width=stage_1_output_shape.width,
                 video_encoder=video_encoder,
                 dtype=self.dtype,
                 device=self.device,
@@ -623,6 +1081,7 @@ class LTXLowVRAMPipeline:
 
             self.vram_manager.offload_to_cpu("video_encoder", video_encoder)
             self.vram_manager.cleanup()
+            self._log_vram_usage("after Phase 2")
             logger.info("[low-vram] Phase 2 done: %.2fs", _time.perf_counter() - t_phase2)
 
         # ============================================================
@@ -644,16 +1103,24 @@ class LTXLowVRAMPipeline:
             logger.info("[low-vram] Using cached transformer")
             transformer = self._cached_transformer
 
+        self.vram_manager.cleanup()
+        self._log_vram_usage("before Phase 3 block swap")
         transformer = self._setup_block_swap_if_needed(transformer)
 
         if self._block_swap_wrapper is not None:
             self._move_non_block_parts_to_gpu(transformer)
         else:
             self.vram_manager.ensure_on_gpu("transformer", transformer)
+        self.vram_manager.cleanup()
+        self._log_vram_usage("before Phase 3 denoise")
 
         sigma_values = self._get_sigma_schedule()
         total_steps = len(sigma_values) - 1  # number of denoising steps
-        sigmas = torch.Tensor(sigma_values).to(self.device)
+        sigmas = torch.tensor(sigma_values, dtype=torch.float32, device=self.device)
+        logger.info(
+            "[low-vram] Sigma schedule: %d steps, values=%s",
+            total_steps, [f'{s:.6f}' for s in sigma_values],
+        )
 
         # Track denoising step for progress callback
         step_counter = [0]
@@ -664,12 +1131,29 @@ class LTXLowVRAMPipeline:
             audio_state: Any,
             stepper: EulerDiffusionStep,
         ) -> tuple[Any, Any]:
-            # Wrap denoise_fn to count steps
-            base_denoise = simple_denoising_func(
-                video_context=video_context,
-                audio_context=audio_context,
-                transformer=transformer,
-            )
+            # Use CFG for dev (non-distilled) models, matching TI2VidOneStagePipeline
+            if use_cfg and neg_video_context is not None:
+                video_guider_factory = MultiModalGuiderFactory.constant(
+                    video_guider_defaults,
+                    negative_context=neg_video_context,
+                )
+                audio_guider_factory = MultiModalGuiderFactory.constant(
+                    audio_guider_defaults,
+                    negative_context=neg_audio_context,
+                )
+                base_denoise = multi_modal_guider_factory_denoising_func(
+                    video_guider_factory=video_guider_factory,
+                    audio_guider_factory=audio_guider_factory,
+                    v_context=video_context,
+                    a_context=audio_context,
+                    transformer=transformer,
+                )
+            else:
+                base_denoise = simple_denoising_func(
+                    video_context=video_context,
+                    audio_context=audio_context,
+                    transformer=transformer,
+                )
 
             def tracked_denoise(*args: Any, **kwargs: Any) -> Any:
                 result = base_denoise(*args, **kwargs)
@@ -687,7 +1171,7 @@ class LTXLowVRAMPipeline:
             )
 
         video_state, audio_state = denoise_audio_video(
-            output_shape=output_shape,
+            output_shape=stage_1_output_shape,
             conditionings=conditionings,
             noiser=noiser,
             sigmas=sigmas,
@@ -700,13 +1184,73 @@ class LTXLowVRAMPipeline:
 
         logger.info("[low-vram] Denoising done: %.2fs", _time.perf_counter() - t_phase3)
 
+        if self._use_upscaler:
+            t_phase3b = _time.perf_counter()
+            logger.info("[low-vram] Phase 3b: 2x upscaler refinement")
+
+            if self._cached_video_encoder is None:
+                video_encoder = self.model_ledger.video_encoder()
+                self._cached_video_encoder = video_encoder
+            else:
+                video_encoder = self._cached_video_encoder
+            self.vram_manager.ensure_on_gpu("video_encoder", video_encoder)
+
+            if self._cached_spatial_upsampler is None:
+                spatial_upsampler = self.model_ledger.spatial_upsampler()
+                self._cached_spatial_upsampler = spatial_upsampler
+            else:
+                spatial_upsampler = self._cached_spatial_upsampler
+            self.vram_manager.ensure_on_gpu("spatial_upsampler", spatial_upsampler)
+
+            upscaled_video_latent = upsample_video(
+                latent=video_state.latent[:1],
+                video_encoder=video_encoder,
+                upsampler=spatial_upsampler,
+            )
+
+            stage_2_conditionings: list[Any] = []
+            if images:
+                ltx_images = [_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images]
+                stage_2_conditionings = image_conditionings_by_replacing_latent(
+                    images=ltx_images,
+                    height=target_output_shape.height,
+                    width=target_output_shape.width,
+                    video_encoder=video_encoder,
+                    dtype=self.dtype,
+                    device=self.device,
+                )
+
+            stage_2_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
+            total_steps += len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1
+            video_state, audio_state = denoise_audio_video(
+                output_shape=target_output_shape,
+                conditionings=stage_2_conditionings,
+                noiser=noiser,
+                sigmas=stage_2_sigmas,
+                stepper=stepper,
+                denoising_loop_fn=cast(Any, denoising_loop),
+                components=self.pipeline_components,
+                dtype=self.dtype,
+                device=self.device,
+                noise_scale=stage_2_sigmas[0],
+                initial_video_latent=upscaled_video_latent,
+                initial_audio_latent=audio_state.latent,
+            )
+
+            self.vram_manager.offload_to_cpu("video_encoder", video_encoder)
+            self.vram_manager.offload_to_cpu("spatial_upsampler", spatial_upsampler)
+            self.vram_manager.cleanup()
+            self._log_vram_usage("after Phase 3b")
+            logger.info("[low-vram] Phase 3b done: %.2fs", _time.perf_counter() - t_phase3b)
+
         # Offload transformer to CPU (keep cached reference)
         if self._block_swap_wrapper is not None:
             self._block_swap_wrapper.offload_all()
         else:
             self.vram_manager.offload_to_cpu("transformer", transformer)
-        self._block_swap_wrapper = None
+        # Don't clear self._block_swap_wrapper — reuse it next generation
         self.vram_manager.cleanup()
+        self._log_vram_usage("after Phase 3")
 
         # ============================================================
         # Phase 4-6: VAE decode + encode to file
@@ -725,6 +1269,10 @@ class LTXLowVRAMPipeline:
         decoded_video = vae_decode_video(
             video_state.latent, video_decoder, tiling_config,
         )
+
+        # ``vae_decode_video`` returns a lazy iterator. Keep the decoder resident
+        # until Phase 6 consumes it during encode_video_output().
+        self._log_vram_usage("after Phase 4 setup")
 
         logger.info("[low-vram] Phase 5: Audio decode")
         if self._cached_audio_decoder is None:
@@ -746,6 +1294,8 @@ class LTXLowVRAMPipeline:
 
         self.vram_manager.offload_to_cpu("audio_decoder", audio_decoder)
         self.vram_manager.offload_to_cpu("vocoder", vocoder)
+        self.vram_manager.cleanup()
+        self._log_vram_usage("after Phase 5")
 
         logger.info("[low-vram] Phase 6: Encoding video output")
         chunks = video_chunks_number(num_frames, tiling_config)
@@ -756,9 +1306,9 @@ class LTXLowVRAMPipeline:
             output_path=output_path,
             video_chunks_number_value=chunks,
         )
-
         self.vram_manager.offload_to_cpu("video_decoder", video_decoder)
         self.vram_manager.cleanup()
+        self._log_vram_usage("after Phase 6")
         logger.info("[low-vram] Phase 4-6 done: %.2fs", _time.perf_counter() - t_phase4)
 
         logger.info("[low-vram] Generation complete: %s", output_path)
@@ -856,11 +1406,15 @@ class LTXLowVRAMPipeline:
         Skips layers that are already in FP8 (e.g. from a pre-quantized model).
         """
         import torch as _torch
+        from services.gguf_loader.gguf_lazy_loader import GGUFLinear
 
         count = 0
         skipped = 0
         for child in text_encoder.modules():
             if not isinstance(child, _torch.nn.Linear):
+                continue
+            if isinstance(child, GGUFLinear):
+                skipped += 1
                 continue
             # Skip if already quantized
             if child.weight.dtype == _torch.float8_e4m3fn:
@@ -872,8 +1426,8 @@ class LTXLowVRAMPipeline:
 
             def _make_upcast_forward(lin: _torch.nn.Linear) -> Any:
                 def _fwd(x: _torch.Tensor, **kw: Any) -> _torch.Tensor:
-                    w = lin.weight.to(x.dtype)
-                    b = lin.bias.to(x.dtype) if lin.bias is not None else None  # pyright: ignore[reportUnnecessaryComparison]
+                    w = lin.weight.to(device=x.device, dtype=x.dtype)
+                    b = lin.bias.to(device=x.device, dtype=x.dtype) if lin.bias is not None else None  # pyright: ignore[reportUnnecessaryComparison]
                     return _torch.nn.functional.linear(x, w, b)
                 return _fwd
 
@@ -885,11 +1439,29 @@ class LTXLowVRAMPipeline:
         else:
             logger.info("Quantized %d Linear layers to FP8 in text encoder", count)
 
+    def _setup_text_encoder_block_swap_cached(
+        self, text_encoder: torch.nn.Module,
+    ) -> "FastBlockSwapWrapper | None":
+        """Apply block swap to Gemma language model layers.
+
+        Reuses the existing wrapper if available to avoid accumulating
+        duplicate forward hooks on every generation call.
+        """
+        if self._te_block_swap_wrapper is not None:
+            self._te_block_swap_wrapper.restore_gpu_blocks()
+            logger.info("Reusing existing text encoder block swap wrapper")
+            return self._te_block_swap_wrapper
+
+        wrapper = self._setup_text_encoder_block_swap(text_encoder)
+        if wrapper is not None:
+            self._te_block_swap_wrapper = wrapper
+        return wrapper
+
     def _setup_text_encoder_block_swap(
         self, text_encoder: torch.nn.Module,
-    ) -> "BlockSwapTransformerWrapper | None":
+    ) -> "FastBlockSwapWrapper | None":
         """Apply block swap to Gemma language model layers."""
-        from services.block_swap.block_swap import BlockSwapTransformerWrapper
+        from services.block_swap.fast_block_swap import FastBlockSwapWrapper
         from services.vram_manager.vram_manager import VRAMTier
 
         gemma_model = getattr(text_encoder, "model", None)
@@ -926,11 +1498,11 @@ class LTXLowVRAMPipeline:
 
         keep_on_gpu = max(1, min(keep_on_gpu, len(layers) - 1))
 
-        wrapper = BlockSwapTransformerWrapper(
+        wrapper = FastBlockSwapWrapper(
             transformer=lang_model,
             device=self.device,
             blocks_to_keep_on_gpu=keep_on_gpu,
-            use_async_prefetch=True,
+            prefetch_distance=2,
         )
 
         if wrapper.block_count == 0:
@@ -992,6 +1564,17 @@ class LTXLowVRAMPipeline:
             buf.data = buf.data.to(self.device)
 
         logger.info("Moved text encoder non-layer parts to GPU (skipping vision_tower)")
+
+    def _log_vram_usage(self, label: str) -> None:
+        """Log current allocated VRAM after a phase boundary."""
+        stats = self.vram_manager.get_vram_debug_stats_mb()
+        logger.info(
+            "[low-vram] VRAM %s: allocated=%dMB reserved=%dMB driver_used=%dMB",
+            label,
+            stats["memory_allocated_mb"],
+            stats["memory_reserved_mb"],
+            stats["driver_used_mb"],
+        )
 
     def _normalize_text_contexts(
         self,

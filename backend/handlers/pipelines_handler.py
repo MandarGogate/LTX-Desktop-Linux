@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
@@ -48,6 +49,131 @@ logger = logging.getLogger(__name__)
 _HIGH_VRAM_THRESHOLD = 48  # Only GPUs with ≥48GB can hold all models simultaneously
 
 
+def _looks_like_incomplete_transformer_checkpoint(checkpoint_path: Path) -> bool:
+    """Detect the known 4-tensor safetensors shim that is not a full transformer."""
+    if checkpoint_path.suffix.lower() != ".safetensors":
+        return False
+    try:
+        from safetensors import safe_open
+
+        with safe_open(str(checkpoint_path), framework="pt", device="cpu") as handle:
+            tensor_count = len(handle.keys())
+        return tensor_count < 100
+    except Exception:
+        logger.warning("Failed to inspect checkpoint %s", checkpoint_path, exc_info=True)
+        return False
+
+
+def _find_full_checkpoint_candidate(models_dir: Path) -> Path | None:
+    """Find a full safetensors checkpoint usable for VAE/audio/vocoder builders."""
+    search_roots = [
+        models_dir / "diffusion_models",
+        models_dir,
+    ]
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.safetensors"):
+            if path in seen or not path.is_file():
+                continue
+            seen.add(path)
+            if _looks_like_incomplete_transformer_checkpoint(path):
+                continue
+            candidates.append(path)
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_size)
+
+
+def _find_dev_checkpoint_candidate(models_dir: Path) -> Path | None:
+    """Prefer an official dev safetensors checkpoint for quality mode when available."""
+    search_roots = [models_dir / "diffusion_models", models_dir]
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*dev*.safetensors"):
+            if path in seen or not path.is_file():
+                continue
+            seen.add(path)
+            if _looks_like_incomplete_transformer_checkpoint(path):
+                continue
+            candidates.append(path)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_size)
+
+
+def _has_split_ltx_component_fallback(models_dir: Path) -> bool:
+    """Whether split LTX VAE/audio component weights are available locally."""
+    video_candidates = (
+        models_dir / "vae" / "LTX23_video_vae_bf16.safetensors",
+        models_dir / "vae" / "LTX2_video_vae_bf16.safetensors",
+    )
+    audio_candidates = (
+        models_dir / "vae" / "LTX23_audio_vae_bf16.safetensors",
+        models_dir / "vae" / "LTX2_audio_vae_bf16.safetensors",
+    )
+    return any(path.exists() for path in video_candidates) and any(path.exists() for path in audio_candidates)
+
+
+def _ensure_split_ltx_component_fallback(models_dir: Path) -> bool:
+    """Ensure split LTX VAE/audio weights exist locally for GGUF decode fallback."""
+    if _has_split_ltx_component_fallback(models_dir):
+        return True
+
+    vae_dir = models_dir / "vae"
+    vae_dir.mkdir(parents=True, exist_ok=True)
+    required_files = (
+        "vae/LTX23_video_vae_bf16.safetensors",
+        "vae/LTX23_audio_vae_bf16.safetensors",
+    )
+
+    try:
+        from huggingface_hub import hf_hub_download  # type: ignore[reportUnknownVariableType]
+
+        for filename in required_files:
+            target = vae_dir / Path(filename).name
+            if target.exists():
+                continue
+
+            logger.info("Downloading split LTX component for GGUF decode: %s", filename)
+            downloaded = Path(str(hf_hub_download(  # type: ignore[reportUnknownMemberType]
+                repo_id="Kijai/LTX2.3_comfy",
+                filename=filename,
+            )))
+            if downloaded != target:
+                shutil.copy2(str(downloaded), str(target))
+
+    except Exception:
+        logger.warning("Failed to auto-download split LTX component fallback", exc_info=True)
+
+    return _has_split_ltx_component_fallback(models_dir)
+
+
+def _path_looks_distilled(path: str | None) -> bool:
+    if path is None:
+        return False
+    return "distilled" in Path(path).name.lower()
+
+
+def _should_use_standard_fast_pipeline(
+    *,
+    model_type: VideoPipelineModelType,
+    checkpoint_path: str | None,
+    gguf_path: str | None,
+) -> bool:
+    return (
+        model_type == "fast"
+        and gguf_path is None
+        and _path_looks_distilled(checkpoint_path)
+    )
+
+
 class PipelinesHandler(StateHandlerBase):
     def __init__(
         self,
@@ -85,10 +211,39 @@ class PipelinesHandler(StateHandlerBase):
             case _:
                 return
 
-    def _pipeline_matches_model_type(self, model_type: VideoPipelineModelType) -> bool:
+    def _compute_pipeline_fingerprint(self, model_type: VideoPipelineModelType) -> str:
+        """Compute a fingerprint of all settings that affect pipeline construction.
+
+        If any of these change, the pipeline must be rebuilt.
+        """
+        import hashlib
+        settings = self.state.app_settings
+        parts = [
+            model_type,
+            settings.preferred_model_path.strip(),
+            settings.preferred_gguf_path.strip(),
+            str(settings.custom_model.steps),
+            str(settings.pro_model.steps),
+            settings.preferred_text_encoder_path.strip(),
+            str(settings.num_blocks_to_swap),
+            settings.run_mode,
+        ]
+        # Include all selected LoRAs (path + strength)
+        for lora in settings.selected_loras:
+            parts.append(f"{lora.path.strip()}:{lora.strength}")
+        raw = "|".join(parts)
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    def _pipeline_matches_config(self, model_type: VideoPipelineModelType) -> bool:
+        """Check if the current GPU pipeline matches the requested model type AND settings."""
         match self.state.gpu_slot:
             case GpuSlot(active_pipeline=VideoPipelineState(pipeline=pipeline)):
-                return getattr(pipeline, '_model_mode', None) == model_type
+                if getattr(pipeline, '_model_mode', None) != model_type:
+                    return False
+                stored_fp = getattr(pipeline, '_config_fingerprint', None)
+                if stored_fp is None:
+                    return False
+                return stored_fp == self._compute_pipeline_fingerprint(model_type)
             case _:
                 return False
 
@@ -141,6 +296,16 @@ class PipelinesHandler(StateHandlerBase):
         vram_gb = self._get_vram_gb()
         preferred_checkpoint_path, preferred_gguf_path = self._resolve_preferred_model_paths()
 
+        if model_type == "quality" and preferred_gguf_path is not None:
+            dev_checkpoint = _find_dev_checkpoint_candidate(self.models_dir)
+            if dev_checkpoint is not None:
+                logger.info(
+                    "Quality mode prefers the official dev safetensors checkpoint over GGUF: %s",
+                    dev_checkpoint,
+                )
+                preferred_checkpoint_path = str(dev_checkpoint)
+                preferred_gguf_path = None
+
         if model_type == "custom":
             return self._create_low_vram_pipeline(
                 model_type,
@@ -151,20 +316,35 @@ class PipelinesHandler(StateHandlerBase):
                 skip_loras=False,
             )
 
-        # For "distil" mode: prefer a distilled GGUF, no LoRAs
+        # For "fast" mode: prefer a distilled base, no LoRAs, 8 steps
+        # For "balanced" mode: dev checkpoint/GGUF + distilled LoRA, 8 steps
         # For "quality" mode: no LoRAs, use dev checkpoint / GGUF with custom steps
-        # For "fast" mode: dev checkpoint/GGUF + distilled LoRA (8 steps)
-        force_gguf = model_type == "distil"
-        skip_loras = model_type in ("distil", "quality")
+        force_gguf = model_type == "fast"
+        skip_loras = model_type in ("fast", "quality")
 
         gguf_path_for_mode = preferred_gguf_path
-        if model_type == 'distil':
+        if model_type == 'fast':
             # Prefer smaller distilled quants for speed/stability in local mode.
             # If the user selected a GGUF, we still try to match that quant first.
             quant = 'Q4_K_M'
             gguf_path_for_mode = self._resolve_distilled_gguf_path(preferred_gguf_path, quant)
             if gguf_path_for_mode is None:
-                logger.warning('Distil mode selected but no distilled GGUF found; will fall back to checkpoint path if available')
+                logger.warning('Fast mode selected but no distilled GGUF found; will fall back to checkpoint path if available')
+
+        if _should_use_standard_fast_pipeline(
+            model_type=model_type,
+            checkpoint_path=preferred_checkpoint_path,
+            gguf_path=gguf_path_for_mode,
+        ):
+            logger.info(
+                "Fast mode using original two-stage distilled pipeline with checkpoint=%s",
+                preferred_checkpoint_path,
+            )
+            return self._create_standard_pipeline(
+                model_type,
+                preferred_checkpoint_path=preferred_checkpoint_path,
+                skip_loras=skip_loras,
+            )
 
         use_low_vram = (
             gguf_path_for_mode is not None
@@ -186,7 +366,7 @@ class PipelinesHandler(StateHandlerBase):
             skip_loras=skip_loras,
         )
 
-    def _resolve_selected_loras(self) -> list[tuple[str, float]]:
+    def _resolve_selected_loras(self, *, allow_legacy_fallback: bool = True) -> list[tuple[str, float]]:
         out: list[tuple[str, float]] = []
         for item in self.state.app_settings.selected_loras:
             path = item.path.strip()
@@ -194,7 +374,7 @@ class PipelinesHandler(StateHandlerBase):
                 out.append((path, item.strength))
 
         # Backward-compatibility for older settings.
-        if not out:
+        if not out and allow_legacy_fallback:
             preferred_path = self.state.app_settings.preferred_lora_path.strip()
             if preferred_path and Path(preferred_path).exists():
                 out.append((preferred_path, self.state.app_settings.preferred_lora_strength))
@@ -217,16 +397,89 @@ class PipelinesHandler(StateHandlerBase):
                     return str(candidate), 0.6
         return None
 
+    def _base_model_is_distilled(
+        self,
+        *,
+        preferred_checkpoint_path: str | None,
+        preferred_gguf_path: str | None,
+    ) -> bool:
+        if preferred_gguf_path is not None:
+            return _path_looks_distilled(preferred_gguf_path)
+        return _path_looks_distilled(preferred_checkpoint_path)
+
+    def _resolve_pipeline_loras(
+        self,
+        *,
+        model_type: VideoPipelineModelType,
+        skip_loras: bool,
+        preferred_checkpoint_path: str | None,
+        preferred_gguf_path: str | None,
+    ) -> tuple[str | None, float, list[tuple[str, float]] | None]:
+        primary_lora_path: str | None = None
+        primary_lora_strength = 1.0
+        extra_loras: list[tuple[str, float]] | None = None
+
+        if skip_loras:
+            return primary_lora_path, primary_lora_strength, extra_loras
+
+        selected_loras = self._resolve_selected_loras(allow_legacy_fallback=model_type == "balanced")
+        base_is_distilled = self._base_model_is_distilled(
+            preferred_checkpoint_path=preferred_checkpoint_path,
+            preferred_gguf_path=preferred_gguf_path,
+        )
+
+        if not selected_loras and model_type == "balanced" and not base_is_distilled:
+            default_lora = self._resolve_default_distilled_lora()
+            if default_lora is not None:
+                selected_loras = [default_lora]
+
+        if base_is_distilled and any("distilled" in Path(path).name.lower() for path, _ in selected_loras):
+            logger.warning(
+                "Skipping distilled LoRAs because the selected base model is already distilled "
+                "(checkpoint=%s gguf=%s)",
+                preferred_checkpoint_path,
+                preferred_gguf_path,
+            )
+            selected_loras = [
+                (path, strength)
+                for path, strength in selected_loras
+                if "distilled" not in Path(path).name.lower()
+            ]
+
+        primary_lora_path = selected_loras[0][0] if selected_loras else None
+        primary_lora_strength = selected_loras[0][1] if selected_loras else 1.0
+        extra_loras = selected_loras[1:] if len(selected_loras) > 1 else None
+        return primary_lora_path, primary_lora_strength, extra_loras
+
     def _resolve_preferred_model_paths(self) -> tuple[str | None, str | None]:
+        from services.gguf_loader.gguf_loader import GGUFModelLoader
+
         preferred_path = self.state.app_settings.preferred_model_path.strip()
+        preferred_gguf_path = self.state.app_settings.preferred_gguf_path.strip()
+
+        if preferred_gguf_path and Path(preferred_gguf_path).exists():
+            return None, preferred_gguf_path
+
         if preferred_path and Path(preferred_path).exists():
             if preferred_path.lower().endswith('.gguf'):
                 return None, preferred_path
+            preferred_checkpoint = Path(preferred_path)
+            if _looks_like_incomplete_transformer_checkpoint(preferred_checkpoint):
+                gguf_loader = GGUFModelLoader(self.models_dir)
+                fallback_gguf = gguf_loader.find_gguf_model("Q8_0")
+                if fallback_gguf is not None:
+                    logger.warning(
+                        "Preferred checkpoint %s looks incomplete; using GGUF %s instead",
+                        preferred_checkpoint,
+                        fallback_gguf,
+                    )
+                    return None, str(fallback_gguf)
+                logger.warning(
+                    "Preferred checkpoint %s looks incomplete and no GGUF fallback was found",
+                    preferred_checkpoint,
+                )
             return preferred_path, None
 
-        preferred_gguf_path = self.state.app_settings.preferred_gguf_path.strip()
-        if preferred_gguf_path and Path(preferred_gguf_path).exists():
-            return None, preferred_gguf_path
         return None, None
 
     def _resolve_distilled_gguf_path(self, preferred_gguf_path: str | None, preferred_quant: str) -> str | None:
@@ -271,19 +524,12 @@ class PipelinesHandler(StateHandlerBase):
         checkpoint_path = preferred_checkpoint_path or str(resolve_model_path(self.models_dir, self.config.model_download_specs,"checkpoint"))
         upsampler_path = str(resolve_model_path(self.models_dir, self.config.model_download_specs,"upsampler"))
 
-        primary_lora_path: str | None = None
-        primary_lora_strength = 1.0
-        extra_loras: list[tuple[str, float]] | None = None
-
-        if not skip_loras:
-            selected_loras = self._resolve_selected_loras()
-            if not selected_loras and model_type == "fast":
-                default_lora = self._resolve_default_distilled_lora()
-                if default_lora is not None:
-                    selected_loras = [default_lora]
-            primary_lora_path = selected_loras[0][0] if selected_loras else None
-            primary_lora_strength = selected_loras[0][1] if selected_loras else 1.0
-            extra_loras = selected_loras[1:] if len(selected_loras) > 1 else None
+        primary_lora_path, primary_lora_strength, extra_loras = self._resolve_pipeline_loras(
+            model_type=model_type,
+            skip_loras=skip_loras,
+            preferred_checkpoint_path=checkpoint_path,
+            preferred_gguf_path=None,
+        )
 
         pipeline = self._fast_video_pipeline_class.create(
             checkpoint_path,
@@ -295,6 +541,7 @@ class PipelinesHandler(StateHandlerBase):
             extra_loras=extra_loras,
         )
         pipeline._model_mode = model_type  # type: ignore[attr-defined]
+        pipeline._config_fingerprint = self._compute_pipeline_fingerprint(model_type)  # type: ignore[attr-defined]
 
         state = VideoPipelineState(
             pipeline=pipeline,
@@ -328,45 +575,68 @@ class PipelinesHandler(StateHandlerBase):
             user_run_mode=self.state.app_settings.run_mode,
         )
 
-        # Check for GGUF model
+        # Default to the full unquantized checkpoint unless the user explicitly
+        # selected a GGUF model. This makes it easier to compare prompt
+        # adherence and isolate GGUF-specific regressions.
         gguf_loader = GGUFModelLoader(self.models_dir)
         gguf_path: str | None = preferred_gguf_path
-        should_auto_use_gguf = (
-            model_type != "custom"
-            and preferred_checkpoint_path is None
-            and (force_gguf or vram_manager.should_use_gguf())
-        )
+        should_auto_use_gguf = False
         if gguf_path is None and should_auto_use_gguf:
             recommended_quant = vram_manager.get_recommended_gguf_quant()
-            gguf_file = gguf_loader.find_gguf_model(recommended_quant)
+            if model_type == "fast":
+                gguf_file_str = self._resolve_distilled_gguf_path(None, recommended_quant)
+                gguf_file = Path(gguf_file_str) if gguf_file_str is not None else None
+            else:
+                gguf_file = gguf_loader.find_gguf_model(recommended_quant)
             if gguf_file is not None:
                 gguf_path = str(gguf_file)
                 logger.info("Using GGUF model: %s (recommended: %s)", gguf_path, recommended_quant)
             else:
-                if force_gguf:
-                    logger.warning("Distil mode requested but no GGUF model found; falling back to checkpoint")
+                if model_type == "fast":
+                    logger.warning("Fast mode requested but no distilled GGUF model was found; using distilled checkpoint instead")
                 else:
                     logger.info("No GGUF model found; using standard checkpoint with low-VRAM offloading")
         elif gguf_path is not None:
             logger.info("Using user-selected GGUF model: %s", gguf_path)
+        else:
+            logger.info("Using standard unquantized checkpoint by default")
 
-        primary_lora_path: str | None = None
-        primary_lora_strength = 1.0
-        extra_loras: list[tuple[str, float]] | None = None
+        if gguf_path is not None and _looks_like_incomplete_transformer_checkpoint(Path(checkpoint_path)):
+            full_checkpoint = _find_full_checkpoint_candidate(self.models_dir)
+            if full_checkpoint is not None:
+                logger.warning(
+                    "Checkpoint %s is transformer-only; using full checkpoint %s for VAE/audio/vocoder components",
+                    checkpoint_path,
+                    full_checkpoint,
+                )
+                checkpoint_path = str(full_checkpoint)
+            elif _ensure_split_ltx_component_fallback(self.models_dir):
+                logger.warning(
+                    "Checkpoint %s is transformer-only; using split LTX component weights from %s/vae",
+                    checkpoint_path,
+                    self.models_dir,
+                )
+            else:
+                raise RuntimeError(
+                    "The selected GGUF can run denoising, but local decode also needs a full "
+                    "LTX safetensors checkpoint or split LTX VAE/audio component weights for "
+                    "the VAE/audio/vocoder components. "
+                    f"Current checkpoint {checkpoint_path} is transformer-only/incomplete. "
+                    "Install the full LTX checkpoint bundle or the split LTX23/LTX2 VAE files, then try again."
+                )
 
-        if not skip_loras:
-            selected_loras = self._resolve_selected_loras()
-            if not selected_loras and model_type == "fast":
-                default_lora = self._resolve_default_distilled_lora()
-                if default_lora is not None:
-                    selected_loras = [default_lora]
-            primary_lora_path = selected_loras[0][0] if selected_loras else None
-            primary_lora_strength = selected_loras[0][1] if selected_loras else 1.0
-            extra_loras = selected_loras[1:] if len(selected_loras) > 1 else None
+        primary_lora_path, primary_lora_strength, extra_loras = self._resolve_pipeline_loras(
+            model_type=model_type,
+            skip_loras=skip_loras,
+            preferred_checkpoint_path=checkpoint_path,
+            preferred_gguf_path=gguf_path,
+        )
 
-        # For quality mode, pass the custom step count
+        # Fast and balanced are both fixed 8-step modes.
         num_inference_steps: int | None = None
-        if model_type == "quality":
+        if model_type in ("fast", "balanced"):
+            num_inference_steps = 8
+        elif model_type == "quality":
             num_inference_steps = self.state.app_settings.pro_model.steps
         elif model_type == "custom":
             num_inference_steps = self.state.app_settings.custom_model.steps
@@ -375,6 +645,13 @@ class PipelinesHandler(StateHandlerBase):
         text_encoder_variant_path = None
         if preferred_text_encoder_path and (self.models_dir / preferred_text_encoder_path).exists():
             text_encoder_variant_path = str(self.models_dir / preferred_text_encoder_path)
+
+        if model_type in ("fast", "balanced"):
+            use_upscaler = self.state.app_settings.fast_model.use_upscaler
+        elif model_type == "quality":
+            use_upscaler = self.state.app_settings.pro_model.use_upscaler
+        else:
+            use_upscaler = self.state.app_settings.custom_model.use_upscaler
 
         pipeline = LTXLowVRAMPipeline.create(
             checkpoint_path,
@@ -389,8 +666,10 @@ class PipelinesHandler(StateHandlerBase):
             use_sage_attention=self.config.use_sage_attention,
             num_inference_steps=num_inference_steps,
             text_encoder_variant_path=text_encoder_variant_path,
+            use_upscaler=use_upscaler,
         )
         pipeline._model_mode = model_type  # type: ignore[attr-defined]
+        pipeline._config_fingerprint = self._compute_pipeline_fingerprint(model_type)  # type: ignore[attr-defined]
 
         logger.info(
             "Created low-VRAM pipeline: mode=%s tier=%s strategy=%s gguf=%s loras=%s",
@@ -591,7 +870,7 @@ class PipelinesHandler(StateHandlerBase):
 
         state: VideoPipelineState | None = None
         with self._lock:
-            if self._pipeline_matches_model_type(model_type):
+            if self._pipeline_matches_config(model_type):
                 match self.state.gpu_slot:
                     case GpuSlot(active_pipeline=VideoPipelineState() as existing_state):
                         state = existing_state

@@ -1,9 +1,17 @@
-"""Z-Image-Turbo image generation pipeline wrapper."""
+"""Z-Image-Turbo image generation pipeline wrapper.
+
+Supports loading from:
+- A pretrained model directory (safetensors)
+- A single GGUF file (transformer loaded via GGUFQuantizationConfig,
+  remaining components fetched from the HuggingFace repo)
+"""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import torch
@@ -12,10 +20,40 @@ from PIL.Image import Image as PILImage
 
 from services.services_utils import ImagePipelineOutputLike, PILImageType, get_device_type
 
+logger = logging.getLogger(__name__)
+
+# HuggingFace repo used to fetch non-transformer components when loading from GGUF.
+_ZIT_BASE_REPO = "Tongyi-MAI/Z-Image-Turbo"
+
 
 @dataclass(slots=True)
 class _ZImageOutput:
     images: Sequence[PILImageType]
+
+
+def _is_gguf_path(model_path: str) -> bool:
+    return model_path.lower().endswith(".gguf")
+
+
+def _load_pipeline_from_gguf(gguf_path: str) -> Any:
+    """Load ZImagePipeline with transformer weights from a GGUF file."""
+    from diffusers import GGUFQuantizationConfig  # type: ignore[reportUnknownVariableType]
+    from diffusers.models import ZImageTransformer2DModel  # type: ignore[reportUnknownVariableType]
+
+    logger.info("Loading ZIT transformer from GGUF: %s", gguf_path)
+    transformer = ZImageTransformer2DModel.from_single_file(  # type: ignore[reportUnknownMemberType]
+        gguf_path,
+        quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
+        torch_dtype=torch.bfloat16,
+    )
+
+    logger.info("Loading ZIT pipeline components from %s", _ZIT_BASE_REPO)
+    pipeline = ZImagePipeline.from_pretrained(  # type: ignore[reportUnknownMemberType]
+        _ZIT_BASE_REPO,
+        transformer=transformer,
+        torch_dtype=torch.bfloat16,
+    )
+    return pipeline
 
 
 class ZitImageGenerationPipeline:
@@ -29,10 +67,15 @@ class ZitImageGenerationPipeline:
     def __init__(self, model_path: str, device: str | None = None) -> None:
         self._device: str | None = None
         self._cpu_offload_active = False
-        self.pipeline = ZImagePipeline.from_pretrained(  # type: ignore[reportUnknownMemberType]
-            model_path,
-            torch_dtype=torch.bfloat16,
-        )
+
+        if _is_gguf_path(model_path):
+            self.pipeline = _load_pipeline_from_gguf(model_path)
+        else:
+            self.pipeline = ZImagePipeline.from_pretrained(  # type: ignore[reportUnknownMemberType]
+                model_path,
+                torch_dtype=torch.bfloat16,
+            )
+
         if device is not None:
             self.to(device)
 
@@ -69,11 +112,21 @@ class ZitImageGenerationPipeline:
         guidance_scale: float,
         num_inference_steps: int,
         seed: int,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> ImagePipelineOutputLike:
         # ZImagePipeline ignores guidance_scale, so we drop it explicitly.
         _ = guidance_scale
         generator = torch.Generator(device=self._resolve_generator_device()).manual_seed(seed)
         pipeline = cast(Any, self.pipeline)
+
+        callback_on_step_end = None
+        if progress_callback is not None:
+            def _on_step_end(pipe: Any, step_index: int, timestep: Any, callback_kwargs: dict[str, Any]) -> dict[str, Any]:
+                del pipe, timestep
+                progress_callback(step_index + 1, num_inference_steps)
+                return callback_kwargs
+            callback_on_step_end = _on_step_end
+
         output = pipeline(
             prompt=prompt,
             height=height,
@@ -83,6 +136,7 @@ class ZitImageGenerationPipeline:
             generator=generator,
             output_type="pil",
             return_dict=True,
+            callback_on_step_end=callback_on_step_end,
         )
         return self._normalize_output(output)
 
