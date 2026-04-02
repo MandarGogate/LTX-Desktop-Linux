@@ -58,6 +58,7 @@ coverage/
 # Misc
 *.local
 .cache/
+.codex
 
 # Models (too large for git - auto-downloaded on first run)
 # Keep the README but ignore all model files
@@ -84,6 +85,10 @@ run-web.sh
 stop-web.sh
 restart-web.sh
 install.sh
+
+# Local planning notes
+TODO.md
+
 
 # Downloaded during CI for Windows NSIS installer
 resources/vc_redist.x64.exe

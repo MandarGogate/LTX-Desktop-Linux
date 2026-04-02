@@ -108,6 +108,32 @@ def _find_dev_checkpoint_candidate(models_dir: Path) -> Path | None:
     return max(candidates, key=lambda path: path.stat().st_size)
 
 
+def _find_dev_gguf_candidate(models_dir: Path, preferred_quant: str = "Q8_0") -> Path | None:
+    """Find a dev GGUF, preferring the requested quant level when available."""
+    search_roots = [models_dir / "diffusion_models", models_dir / "gguf", models_dir]
+    search_order = [preferred_quant]
+    for quant in ["Q8_0", "Q6_K", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q2_K"]:
+        if quant not in search_order:
+            search_order.append(quant)
+
+    for quant in search_order:
+        for root in search_roots:
+            if not root.exists():
+                continue
+            for path in root.rglob(f"*dev*{quant}*.gguf"):
+                if path.is_file():
+                    return path
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*dev*.gguf"):
+            if path.is_file():
+                return path
+
+    return None
+
+
 def _has_split_ltx_component_fallback(models_dir: Path) -> bool:
     """Whether split LTX VAE/audio component weights are available locally."""
     video_candidates = (
@@ -939,7 +965,7 @@ class PipelinesHandler(StateHandlerBase):
             self._assert_invariants()
         return state
 
-    def load_a2v_pipeline(self) -> A2VPipelineState:
+    def load_a2v_pipeline(self, model_type: VideoPipelineModelType = "quality") -> A2VPipelineState:
         self._install_text_patches_if_needed()
 
         with self._lock:
@@ -951,11 +977,111 @@ class PipelinesHandler(StateHandlerBase):
 
         self._evict_gpu_pipeline_for_swap()
 
-        pipeline = self._a2v_pipeline_class.create(
-            str(resolve_model_path(self.models_dir, self.config.model_download_specs,"checkpoint")),
-            self._text_handler.resolve_gemma_root(),
-            str(resolve_model_path(self.models_dir, self.config.model_download_specs,"upsampler")),
+        vram_gb = 0
+        if self._gpu_info is not None:
+            vram_gb = self._gpu_info.get_vram_total_gb() or 0
+        vram_manager = VRAMManager(
             self.config.device,
+            vram_gb,
+            user_blocks_on_gpu=self.state.app_settings.num_blocks_to_swap,
+            user_run_mode=self.state.app_settings.run_mode,
+        )
+
+        preferred_checkpoint_path, preferred_gguf_path = self._resolve_preferred_model_paths()
+        checkpoint_path = preferred_checkpoint_path or str(
+            resolve_model_path(self.models_dir, self.config.model_download_specs, "checkpoint")
+        )
+
+        # Match T2V model-selection semantics.
+        skip_loras = model_type in ("fast", "quality")
+
+        gguf_path_for_mode = preferred_gguf_path
+        if model_type == "quality" and gguf_path_for_mode is not None:
+            dev_checkpoint = _find_dev_checkpoint_candidate(self.models_dir)
+            if dev_checkpoint is not None:
+                logger.info(
+                    "A2V quality mode prefers dev safetensors over GGUF: %s",
+                    dev_checkpoint,
+                )
+                checkpoint_path = str(dev_checkpoint)
+                gguf_path_for_mode = None
+
+        if model_type == "fast":
+            gguf_path_for_mode = self._resolve_distilled_gguf_path(preferred_gguf_path, "Q4_K_M")
+            if gguf_path_for_mode is None:
+                logger.warning("A2V fast mode selected but no distilled GGUF found; using checkpoint path")
+        elif model_type == "balanced":
+            preferred_quant = "Q8_0"
+            preferred_model = self.state.app_settings.preferred_model_path.strip().lower()
+            preferred_gguf = preferred_gguf_path.lower() if preferred_gguf_path is not None else ""
+            for quant in ("Q8_0", "Q6_K", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q2_K"):
+                if quant.lower() in preferred_model or quant.lower() in preferred_gguf:
+                    preferred_quant = quant
+                    break
+
+            dev_gguf = _find_dev_gguf_candidate(self.models_dir, preferred_quant)
+            if dev_gguf is not None:
+                gguf_path_for_mode = str(dev_gguf)
+                logger.info("A2V balanced mode prefers dev GGUF with distilled LoRA: %s", dev_gguf)
+            else:
+                dev_checkpoint = _find_dev_checkpoint_candidate(self.models_dir)
+                if dev_checkpoint is not None:
+                    checkpoint_path = str(dev_checkpoint)
+                    gguf_path_for_mode = None
+                    logger.info(
+                        "A2V balanced mode prefers dev safetensors with distilled LoRA: %s",
+                        dev_checkpoint,
+                    )
+
+        if gguf_path_for_mode is not None and _looks_like_incomplete_transformer_checkpoint(Path(checkpoint_path)):
+            full_checkpoint = _find_full_checkpoint_candidate(self.models_dir)
+            if full_checkpoint is not None:
+                logger.warning(
+                    "A2V GGUF selected; using full checkpoint %s for VAE/audio/vocoder components",
+                    full_checkpoint,
+                )
+                checkpoint_path = str(full_checkpoint)
+
+        primary_lora_path, primary_lora_strength, extra_loras = self._resolve_pipeline_loras(
+            model_type=model_type,
+            skip_loras=skip_loras,
+            preferred_checkpoint_path=checkpoint_path,
+            preferred_gguf_path=gguf_path_for_mode,
+        )
+
+        if model_type in ("fast", "balanced"):
+            num_inference_steps = 8
+        elif model_type == "quality":
+            num_inference_steps = self.state.app_settings.pro_model.steps
+        else:
+            num_inference_steps = self.state.app_settings.custom_model.steps
+
+        preferred_text_encoder_path = self.state.app_settings.preferred_text_encoder_path.strip()
+        text_encoder_variant_path = None
+        if preferred_text_encoder_path and (self.models_dir / preferred_text_encoder_path).exists():
+            text_encoder_variant_path = str(self.models_dir / preferred_text_encoder_path)
+
+        if model_type in ("fast", "balanced"):
+            use_upscaler = self.state.app_settings.fast_model.use_upscaler
+        elif model_type == "quality":
+            use_upscaler = self.state.app_settings.pro_model.use_upscaler
+        else:
+            use_upscaler = self.state.app_settings.custom_model.use_upscaler
+
+        pipeline = self._a2v_pipeline_class.create(
+            checkpoint_path,
+            self._text_handler.resolve_gemma_root(),
+            str(resolve_model_path(self.models_dir, self.config.model_download_specs, "upsampler")),
+            self.config.device,
+            vram_manager=vram_manager,
+            use_sage_attention=self.config.use_sage_attention,
+            gguf_path=gguf_path_for_mode,
+            lora_path=primary_lora_path,
+            lora_strength=primary_lora_strength,
+            extra_loras=extra_loras,
+            num_inference_steps=num_inference_steps,
+            text_encoder_variant_path=text_encoder_variant_path,
+            use_upscaler=use_upscaler,
         )
         state = A2VPipelineState(pipeline=pipeline)
 

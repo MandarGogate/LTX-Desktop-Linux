@@ -46,6 +46,10 @@ class FastBlockSwapWrapper:
         self._block_names: list[str] = []
         self._blocks: list[torch.nn.Module] = []
         self._gpu_block_indices: set[int] = set()
+        # Blocks currently being prefetched to GPU on transfer stream.
+        # They are "scheduled" for GPU but not yet safe to execute until
+        # the transfer stream is synchronized.
+        self._inflight_prefetch_indices: set[int] = set()
         self._pending_offload: list[int] = []
 
         # CUDA streams
@@ -150,11 +154,24 @@ class FastBlockSwapWrapper:
             block.register_forward_hook(make_post_hook(i))
 
     def _on_block_pre_forward(self, block_idx: int) -> None:
-        # Ensure this block is on GPU
-        if block_idx not in self._gpu_block_indices:
-            # Wait for any pending prefetch of THIS block
+        # If this block was prefetched asynchronously, wait until the H2D
+        # transfer is actually complete before executing it.
+        if block_idx in self._inflight_prefetch_indices:
             if self._transfer_stream is not None:
                 self._transfer_stream.synchronize()
+            self._inflight_prefetch_indices.discard(block_idx)
+
+        # Ensure this block is on GPU
+        if block_idx not in self._gpu_block_indices:
+            # Wait for any pending prefetch AND offload to complete.
+            # The offload stream must be synced because a prior
+            # _flush_offloads may have scheduled an async D2H copy for
+            # this block.  Without the sync, _pin_block would read
+            # partially-written CPU data and upload garbage weights.
+            if self._transfer_stream is not None:
+                self._transfer_stream.synchronize()
+            if self._offload_stream is not None:
+                self._offload_stream.synchronize()
             if block_idx not in self._gpu_block_indices:
                 self._pin_block(self._blocks[block_idx])
                 self._blocks[block_idx].to(self.device, non_blocking=False)
@@ -170,10 +187,15 @@ class FastBlockSwapWrapper:
             and prefetch_idx < len(self._blocks)
             and prefetch_idx not in self._gpu_block_indices
         ):
+            # Ensure any pending offload of the prefetch target has landed
+            # on CPU before we try to pin + re-upload it.
+            if self._offload_stream is not None:
+                self._offload_stream.synchronize()
             with self._torch.cuda.stream(self._transfer_stream):
                 self._pin_block(self._blocks[prefetch_idx])
                 self._blocks[prefetch_idx].to(self.device, non_blocking=True)
                 self._gpu_block_indices.add(prefetch_idx)
+                self._inflight_prefetch_indices.add(prefetch_idx)
 
     def _on_block_post_forward(self, block_idx: int) -> None:
         # Defer offload — don't block here
@@ -197,6 +219,9 @@ class FastBlockSwapWrapper:
         self._pending_offload = self._pending_offload[extra_on_gpu - max_extra :]
 
         for idx in to_offload:
+            if idx in self._inflight_prefetch_indices:
+                # Don't race an in-flight H2D prefetch with D2H offload.
+                continue
             if idx in self._gpu_block_indices and idx >= self.blocks_to_keep_on_gpu:
                 block = self._blocks[idx]
                 if self._offload_stream is not None:
@@ -220,6 +245,7 @@ class FastBlockSwapWrapper:
                 else:
                     block.to(self.cpu_device)
         self._gpu_block_indices.clear()
+        self._inflight_prefetch_indices.clear()
         self._pending_offload.clear()
         if self._offload_stream is not None:
             self._offload_stream.synchronize()
@@ -229,6 +255,7 @@ class FastBlockSwapWrapper:
         gc.collect()
 
     def restore_gpu_blocks(self) -> None:
+        self._inflight_prefetch_indices.clear()
         for i in range(min(self.blocks_to_keep_on_gpu, len(self._blocks))):
             self._blocks[i].to(self.device)
             self._gpu_block_indices.add(i)

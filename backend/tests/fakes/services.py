@@ -679,14 +679,41 @@ class FakeA2VPipeline:
         gemma_root: str | None,
         upsampler_path: str,
         device: str | object,
+        vram_manager: object | None = None,
+        *,
+        use_sage_attention: bool = True,
+        gguf_path: str | None = None,
+        lora_path: str | None = None,
+        lora_strength: float = 1.0,
+        extra_loras: list[tuple[str, float]] | None = None,
+        num_inference_steps: int | None = None,
+        text_encoder_variant_path: str | None = None,
+        use_upscaler: bool = False,
     ) -> "FakeA2VPipeline":
-        del checkpoint_path, gemma_root, upsampler_path, device
         pipeline = FakeA2VPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeA2VPipeline singleton is not bound")
+        pipeline.create_calls.append(
+            {
+                "checkpoint_path": checkpoint_path,
+                "gemma_root": gemma_root,
+                "upsampler_path": upsampler_path,
+                "device": device,
+                "vram_manager": vram_manager,
+                "use_sage_attention": use_sage_attention,
+                "gguf_path": gguf_path,
+                "lora_path": lora_path,
+                "lora_strength": lora_strength,
+                "extra_loras": extra_loras,
+                "num_inference_steps": num_inference_steps,
+                "text_encoder_variant_path": text_encoder_variant_path,
+                "use_upscaler": use_upscaler,
+            }
+        )
         return pipeline
 
     def __init__(self) -> None:
+        self.create_calls: list[dict[str, Any]] = []
         self.generate_calls: list[dict[str, Any]] = []
         self.raise_on_generate: Exception | None = None
 
@@ -694,6 +721,11 @@ class FakeA2VPipeline:
         self.generate_calls.append(kwargs)
         if self.raise_on_generate is not None:
             raise self.raise_on_generate
+        progress_callback = kwargs.get("progress_callback")
+        num_inference_steps = kwargs.get("num_inference_steps", 11)
+        if callable(progress_callback):
+            for step in range(1, int(num_inference_steps) + 1):
+                progress_callback(step, int(num_inference_steps))
 
         output_path = Path(kwargs["output_path"])
         output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
 from api_types import ImageConditioningInput
@@ -17,6 +18,16 @@ class A2VPipeline(Protocol):
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
+        vram_manager: object | None = None,
+        *,
+        use_sage_attention: bool = True,
+        gguf_path: str | None = None,
+        lora_path: str | None = None,
+        lora_strength: float = 1.0,
+        extra_loras: list[tuple[str, float]] | None = None,
+        num_inference_steps: int | None = None,
+        text_encoder_variant_path: str | None = None,
+        use_upscaler: bool = False,
     ) -> "A2VPipeline": ...
 
     def generate(
@@ -34,4 +45,5 @@ class A2VPipeline(Protocol):
         audio_start_time: float,
         audio_max_duration: float | None,
         output_path: str,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> None: ...

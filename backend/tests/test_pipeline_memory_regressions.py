@@ -88,8 +88,31 @@ class _DummyVRAMManager:
         return self.free_vram_mb
 
 
+@dataclass
+class _TrackingVRAMManager(_DummyVRAMManager):
+    ensure_oom: bool = False
+    ensure_calls: int = 0
+    cleanup_calls: int = 0
+
+    def ensure_on_gpu(self, name: str, module: nn.Module) -> None:
+        self.ensure_calls += 1
+        if self.ensure_oom:
+            raise RuntimeError(f"{name} CUDA out of memory")
+
+    def cleanup(self) -> None:
+        self.cleanup_calls += 1
+
+
 def _hook_counts(module: nn.Module) -> tuple[int, int]:
     return (len(module._forward_pre_hooks), len(module._forward_hooks))
+
+
+class _WrapperStub:
+    def __init__(self) -> None:
+        self.offload_all_calls = 0
+
+    def offload_all(self) -> None:
+        self.offload_all_calls += 1
 
 
 class TestLowVRAMPipelineRegressions:
@@ -165,6 +188,72 @@ class TestLowVRAMPipelineRegressions:
         assert after_first[0] > before[0]
         assert after_first[1] > before[1]
         assert after_second == after_first
+
+    def test_prepare_a2v_transformer_uses_existing_block_swap_wrapper(self) -> None:
+        pipeline = LTXLowVRAMPipeline.__new__(LTXLowVRAMPipeline)
+        pipeline.device = torch.device("cpu")
+        pipeline.vram_manager = _TrackingVRAMManager()
+        pipeline._block_swap_wrapper = _WrapperStub()
+
+        move_calls = {"count": 0}
+
+        def _setup(transformer: nn.Module) -> nn.Module:
+            return transformer
+
+        def _move(transformer: nn.Module) -> None:
+            move_calls["count"] += 1
+
+        pipeline._setup_block_swap_if_needed = _setup  # type: ignore[method-assign]
+        pipeline._move_non_block_parts_to_gpu = _move  # type: ignore[method-assign]
+
+        transformer = _TransformerWrapper(block_count=6)
+        prepared_transformer, using_block_swap = pipeline._prepare_a2v_transformer_for_denoise(
+            transformer
+        )
+
+        assert prepared_transformer is transformer
+        assert using_block_swap is True
+        assert move_calls["count"] == 1
+        assert pipeline.vram_manager.ensure_calls == 0
+        assert pipeline.vram_manager.cleanup_calls == 2
+        assert pipeline._block_swap_wrapper.offload_all_calls == 1
+
+    def test_prepare_a2v_transformer_falls_back_to_block_swap_after_oom(self) -> None:
+        pipeline = LTXLowVRAMPipeline.__new__(LTXLowVRAMPipeline)
+        pipeline.device = torch.device("cpu")
+        pipeline.vram_manager = _TrackingVRAMManager(
+            offload_strategy=OffloadStrategy.SEQUENTIAL,
+            ensure_oom=True,
+        )
+        pipeline._block_swap_wrapper = None
+
+        move_calls = {"count": 0}
+        setup_calls = {"count": 0}
+
+        def _setup(transformer: nn.Module) -> nn.Module:
+            setup_calls["count"] += 1
+            if setup_calls["count"] >= 2:
+                pipeline._block_swap_wrapper = _WrapperStub()
+            return transformer
+
+        def _move(transformer: nn.Module) -> None:
+            move_calls["count"] += 1
+
+        pipeline._setup_block_swap_if_needed = _setup  # type: ignore[method-assign]
+        pipeline._move_non_block_parts_to_gpu = _move  # type: ignore[method-assign]
+
+        transformer = _TransformerWrapper(block_count=6)
+        prepared_transformer, using_block_swap = pipeline._prepare_a2v_transformer_for_denoise(
+            transformer
+        )
+
+        assert prepared_transformer is transformer
+        assert using_block_swap is True
+        assert setup_calls["count"] == 2
+        assert move_calls["count"] == 1
+        assert pipeline.vram_manager.ensure_calls == 1
+        assert pipeline.vram_manager.cleanup_calls == 3
+        assert pipeline._block_swap_wrapper is not None
 
 
 class TestOptimizedPipelineRegressions:

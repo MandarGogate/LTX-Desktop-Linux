@@ -311,11 +311,18 @@ class VideoGenerationHandler(StateHandlerBase):
     def _generate_a2v(
         self, req: GenerateVideoRequest, duration: float, fps: int, *, audio_path: str
     ) -> GenerateVideoResponse:
-        if req.model != "pro":
-            logger.warning(
-                "A2V local requested with model=%s; A2V always uses pro pipeline",
-                req.model,
-            )
+        model_choice = req.model.strip().lower()
+        if model_choice in ("distil", "distilled", "fast"):
+            pipeline_model_type = "fast"
+        elif model_choice == "balanced":
+            pipeline_model_type = "balanced"
+        elif model_choice in ("quality", "pro"):
+            pipeline_model_type = "quality"
+        elif model_choice == "custom":
+            pipeline_model_type = "custom"
+        else:
+            pipeline_model_type = "fast"
+
         validated_audio_path = validate_audio_file(audio_path)
         audio_path_str = str(validated_audio_path)
 
@@ -339,7 +346,7 @@ class VideoGenerationHandler(StateHandlerBase):
         generation_id = self._make_generation_id()
 
         try:
-            a2v_state = self._pipelines.load_a2v_pipeline()
+            a2v_state = self._pipelines.load_a2v_pipeline(pipeline_model_type)
             self._generation.start_generation(generation_id)
 
             enhanced_prompt = req.prompt + self.config.camera_motion_prompts.get(
@@ -365,12 +372,25 @@ class VideoGenerationHandler(StateHandlerBase):
 
             output_path = self._make_output_path()
 
-            total_steps = 11  # distilled: 8 steps (stage 1) + 3 steps (stage 2)
+            # Match T2V step policy by mode.
+            if pipeline_model_type in ("fast", "balanced"):
+                stage_1_steps = 8
+            elif pipeline_model_type == "quality":
+                stage_1_steps = self.state.app_settings.pro_model.steps
+            else:
+                stage_1_steps = self.state.app_settings.custom_model.steps
+            total_steps = stage_1_steps + 3
 
             self._generation.update_progress("loading_model", 5, 0, total_steps)
             self._generation.update_progress("encoding_text", 10, 0, total_steps)
             self._text.prepare_text_encoding(enhanced_prompt, enhance_prompt=False)
             self._generation.update_progress("inference", 15, 0, total_steps)
+
+            def on_step(current_step: int, step_total: int) -> None:
+                pct = 15 + int((current_step / max(step_total, 1)) * 75)
+                self._generation.update_progress(
+                    "inference", pct, current_step, step_total
+                )
 
             a2v_state.pipeline.generate(
                 prompt=enhanced_prompt,
@@ -380,12 +400,13 @@ class VideoGenerationHandler(StateHandlerBase):
                 width=width,
                 num_frames=num_frames,
                 frame_rate=fps,
-                num_inference_steps=total_steps,
+                num_inference_steps=stage_1_steps,
                 images=images,
                 audio_path=audio_path_str,
                 audio_start_time=0.0,
                 audio_max_duration=None,
                 output_path=str(output_path),
+                progress_callback=on_step,
             )
 
             if self._generation.is_generation_cancelled():

@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from state.app_settings import SelectedLoRASettings
 from state.app_state_types import GpuSlot, VideoPipelineState, VideoPipelineWarmth
+from services.vram_manager.vram_manager import OffloadStrategy
 from tests.fakes.services import FakeFastVideoPipeline
 
 
@@ -38,6 +40,38 @@ def _write_test_wav(path: Path, *, duration_seconds: float = 0.1, sample_rate: i
 
 def _enable_local_text_encoding(test_state) -> None:
     test_state.state.app_settings.use_local_text_encoder = True
+
+
+def _write_fake_a2v_model_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x00" * 1024)
+
+
+def _configure_a2v_fast_distilled_inputs(test_state) -> None:
+    models_dir = test_state.config.default_models_dir
+    distilled_gguf = models_dir / "diffusion_models" / "ltx-2.3-22b-distilled-Q4_0.gguf"
+    _write_fake_a2v_model_file(distilled_gguf)
+    test_state.state.app_settings.preferred_model_path = str(distilled_gguf)
+    test_state.state.app_settings.preferred_gguf_path = ""
+    test_state.state.app_settings.selected_loras = []
+    test_state.state.app_settings.preferred_lora_path = ""
+    test_state.state.app_settings.preferred_lora_strength = 1.0
+
+
+def _configure_a2v_balanced_dev_distilled_lora_inputs(test_state) -> tuple[Path, Path]:
+    models_dir = test_state.config.default_models_dir
+    dev_gguf = models_dir / "diffusion_models" / "ltx-2.3-22b-dev-Q8_0.gguf"
+    distilled_lora = models_dir / "loras" / "ltx-2.3-22b-distilled-lora-384.safetensors"
+    _write_fake_a2v_model_file(dev_gguf)
+    _write_fake_a2v_model_file(distilled_lora)
+    test_state.state.app_settings.preferred_model_path = str(dev_gguf)
+    test_state.state.app_settings.preferred_gguf_path = ""
+    test_state.state.app_settings.selected_loras = [
+        SelectedLoRASettings(path=str(distilled_lora), strength=0.6)
+    ]
+    test_state.state.app_settings.preferred_lora_path = str(distilled_lora)
+    test_state.state.app_settings.preferred_lora_strength = 0.6
+    return dev_gguf, distilled_lora
 
 
 def _fake_running_generation_state(test_state) -> None:
@@ -231,11 +265,20 @@ class TestA2VGenerate:
         assert Path(data["video_path"]).exists()
 
         pipeline = fake_services.a2v_pipeline
+        assert len(pipeline.create_calls) == 1
         assert len(pipeline.generate_calls) == 1
+        create_call = pipeline.create_calls[0]
         call = pipeline.generate_calls[0]
+        assert create_call["vram_manager"] is not None
+        assert create_call["use_sage_attention"] is False
+        assert create_call["vram_manager"].offload_strategy in (
+            OffloadStrategy.BLOCK_SWAP,
+            OffloadStrategy.BLOCK_SWAP_AGGRESSIVE,
+        )
         assert call["audio_path"] == str(audio_file)
         assert call["audio_start_time"] == 0.0
         assert call["audio_max_duration"] is None
+        assert callable(call["progress_callback"])
 
     def test_a2v_rejects_missing_audio_file(self, client, test_state, create_fake_model_files):
         create_fake_model_files()
@@ -298,6 +341,56 @@ class TestA2VGenerate:
             call = fake_services.a2v_pipeline.generate_calls[0]
             assert call["width"] == expected_w, f"{resolution}: expected width {expected_w}, got {call['width']}"
             assert call["height"] == expected_h, f"{resolution}: expected height {expected_h}, got {call['height']}"
+
+    def test_a2v_fast_prefers_distilled_model_without_lora(self, client, test_state, fake_services, create_fake_model_files, tmp_path):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+        _configure_a2v_fast_distilled_inputs(test_state)
+        audio_file = tmp_path / "test_audio.wav"
+        _write_test_wav(audio_file)
+
+        r = client.post(
+            "/api/generate",
+            json={
+                "prompt": "A music video",
+                "model": "fast",
+                "duration": "2",
+                "fps": "24",
+                "audioPath": str(audio_file),
+            },
+        )
+
+        assert r.status_code == 200
+        create_call = fake_services.a2v_pipeline.create_calls[0]
+        assert create_call["gguf_path"] is not None
+        assert "distilled" in create_call["gguf_path"].lower()
+        assert create_call["lora_path"] is None
+        assert create_call["num_inference_steps"] == 8
+
+    def test_a2v_balanced_prefers_dev_plus_distilled_lora(self, client, test_state, fake_services, create_fake_model_files, tmp_path):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+        dev_gguf, distilled_lora = _configure_a2v_balanced_dev_distilled_lora_inputs(test_state)
+        audio_file = tmp_path / "test_audio.wav"
+        _write_test_wav(audio_file)
+
+        r = client.post(
+            "/api/generate",
+            json={
+                "prompt": "A music video",
+                "model": "balanced",
+                "duration": "2",
+                "fps": "24",
+                "audioPath": str(audio_file),
+            },
+        )
+
+        assert r.status_code == 200
+        create_call = fake_services.a2v_pipeline.create_calls[0]
+        assert create_call["gguf_path"] == str(dev_gguf)
+        assert create_call["lora_path"] == str(distilled_lora)
+        assert create_call["lora_strength"] == 0.6
+        assert create_call["num_inference_steps"] == 8
 
 class TestGenerateCancel:
     def test_cancel_active(self, client, test_state):
@@ -423,5 +516,4 @@ class TestEmptyPromptRejected:
     def test_missing_image_prompt_rejected(self, client):
         r = client.post("/api/generate-image", json={})
         assert r.status_code == 422
-
 

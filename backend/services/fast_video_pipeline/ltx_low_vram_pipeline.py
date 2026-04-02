@@ -626,6 +626,47 @@ class LTXLowVRAMPipeline:
 
         return transformer
 
+    def _prepare_a2v_transformer_for_denoise(
+        self, transformer: torch.nn.Module
+    ) -> tuple[torch.nn.Module, bool]:
+        """Prepare the A2V transformer for denoising.
+
+        Returns the possibly wrapped transformer plus whether block swap is
+        actively in use for subsequent offload / bring-back decisions.
+        """
+        self.vram_manager.cleanup()
+        transformer = self._setup_block_swap_if_needed(transformer)
+        using_block_swap = self._block_swap_wrapper is not None
+
+        try:
+            # Prefer full placement when block swap is not active. If block
+            # swap is active, only keep the non-block pieces resident and let
+            # the wrapper manage block residency.
+            if using_block_swap:
+                self._move_non_block_parts_to_gpu(transformer)
+            else:
+                self.vram_manager.ensure_on_gpu("transformer", transformer)
+        except Exception as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            logger.warning(
+                "[low-vram-a2v] Full transformer GPU placement OOM; falling back to block swap"
+            )
+            self.vram_manager.cleanup()
+            transformer = self._setup_block_swap_if_needed(transformer)
+            if self._block_swap_wrapper is None:
+                raise
+            self._move_non_block_parts_to_gpu(transformer)
+            using_block_swap = True
+        else:
+            if using_block_swap and self._block_swap_wrapper is not None:
+                # Ensure hooks state doesn't keep stale residency assumptions
+                # before the actual denoising loop starts.
+                self._block_swap_wrapper.offload_all()
+
+        self.vram_manager.cleanup()
+        return transformer, using_block_swap
+
     def _load_gguf_transformer(self) -> Any:
         """Load transformer from GGUF file instead of safetensors.
 
@@ -1312,6 +1353,482 @@ class LTXLowVRAMPipeline:
         logger.info("[low-vram] Phase 4-6 done: %.2fs", _time.perf_counter() - t_phase4)
 
         logger.info("[low-vram] Generation complete: %s", output_path)
+
+    # ------------------------------------------------------------------
+    # A2V generation (reuses all low-VRAM infrastructure)
+    # ------------------------------------------------------------------
+
+    def generate_a2v(
+        self,
+        prompt: str,
+        seed: int,
+        height: int,
+        width: int,
+        num_frames: int,
+        frame_rate: float,
+        images: list[Any],
+        output_path: str,
+        audio_path: str,
+        audio_start_time: float = 0.0,
+        audio_max_duration: float | None = None,
+        progress_callback: Any = None,
+        negative_prompt: str = "",
+    ) -> None:
+        import torch
+
+        with torch.inference_mode():
+            self._generate_a2v_impl(
+                prompt=prompt,
+                seed=seed,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                frame_rate=frame_rate,
+                images=images,
+                output_path=output_path,
+                audio_path=audio_path,
+                audio_start_time=audio_start_time,
+                audio_max_duration=audio_max_duration,
+                progress_callback=progress_callback,
+                negative_prompt=negative_prompt,
+            )
+
+    def _generate_a2v_impl(
+        self,
+        prompt: str,
+        seed: int,
+        height: int,
+        width: int,
+        num_frames: int,
+        frame_rate: float,
+        images: list[Any],
+        output_path: str,
+        audio_path: str,
+        audio_start_time: float = 0.0,
+        audio_max_duration: float | None = None,
+        progress_callback: Any = None,
+        negative_prompt: str = "",
+    ) -> None:
+        """A2V generation using the same low-VRAM infrastructure as T2V/I2V.
+
+        Key differences from normal generation:
+        - Encodes audio input as frozen latent conditioning
+        - Uses denoise_video_only (audio is frozen, not jointly denoised)
+        - Returns original audio (not VAE-decoded) for fidelity
+        - Always uses two-stage (half-res + refinement) like the original A2V
+        """
+        import torch
+        import time as _time
+
+        from ltx_core.components.diffusion_steps import EulerDiffusionStep
+        from ltx_core.components.noisers import GaussianNoiser
+        from ltx_core.model.audio_vae import encode_audio as vae_encode_audio
+        from ltx_core.model.upsampler import upsample_video
+        from ltx_core.model.video_vae import decode_video as vae_decode_video
+        from ltx_core.text_encoders.gemma import encode_text
+        from ltx_core.types import Audio, AudioLatentShape, VideoPixelShape
+        from ltx_pipelines.utils.args import ImageConditioningInput as _LtxImageInput
+        from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES, STAGE_2_DISTILLED_SIGMA_VALUES
+        from ltx_pipelines.utils.helpers import (
+            cleanup_memory,
+            denoise_video_only,
+            image_conditionings_by_replacing_latent,
+            multi_modal_guider_factory_denoising_func,
+            simple_denoising_func,
+        )
+        from ltx_pipelines.utils.media_io import decode_audio_from_file
+        from ltx_pipelines.utils.samplers import euler_denoising_loop
+        from services.ltx_pipeline_common import encode_video_output, video_chunks_number
+
+        logger.info(
+            "[low-vram-a2v] Starting A2V generation: %dx%d, %d frames, tier=%s",
+            width, height, num_frames, self.vram_manager.tier.value,
+        )
+
+        generator = torch.Generator(device=self.device).manual_seed(seed)
+        noiser = GaussianNoiser(generator=generator)
+        stepper = EulerDiffusionStep()
+
+        # ============================================================
+        # Phase 1: Text encoding (reuses cached text encoder)
+        # ============================================================
+        t_phase1 = _time.perf_counter()
+        logger.info("[low-vram-a2v] Phase 1: Text encoding")
+
+        if self._cached_text_encoder is None:
+            logger.info("[low-vram-a2v] Loading text encoder from disk")
+            text_encoder = self.model_ledger.text_encoder()
+            if not getattr(text_encoder, "_ltx_gguf_text_encoder", False):
+                self._quantize_text_encoder_fp8(text_encoder)
+            self._cached_text_encoder = text_encoder
+        else:
+            text_encoder = self._cached_text_encoder
+
+        te_block_swap = self._setup_text_encoder_block_swap_cached(text_encoder)
+        if te_block_swap is None:
+            text_encoder.to(self.device)
+        else:
+            self._move_text_encoder_non_layers_to_gpu(text_encoder)
+
+        gemma = getattr(text_encoder, "model", None)
+        if gemma is not None:
+            _device = self.device
+            if not getattr(gemma, "_device_override_applied", False):
+                class _DeviceOverride(type(gemma)):  # type: ignore[misc]
+                    @property
+                    def device(self_inner: Any) -> Any:  # type: ignore[override]
+                        return _device
+                gemma.__class__ = _DeviceOverride  # type: ignore[assignment]
+                gemma._device_override_applied = True  # type: ignore[attr-defined]
+
+        context_p = encode_text(text_encoder, prompts=[prompt])[0]
+        video_context, audio_context = self._normalize_text_contexts(*context_p)
+
+        # IMPORTANT: for dev A2V, encode negative prompt while text encoder is
+        # already resident to avoid reloading it after transformer placement.
+        # Reloading text encoder later can OOM on 24GB cards.
+        neg_video_context: torch.Tensor | None = None
+        neg_audio_context: torch.Tensor | None = None
+        if not self._is_distilled_mode():
+            dev_negative_prompt, _, _ = _get_official_dev_guidance_defaults()
+            resolved_neg = negative_prompt.strip() or dev_negative_prompt
+            neg_context_p = encode_text(text_encoder, prompts=[resolved_neg])[0]
+            neg_video_context, neg_audio_context = self._normalize_text_contexts(*neg_context_p)
+
+        if te_block_swap is not None:
+            te_block_swap.offload_all()
+        else:
+            text_encoder.to("cpu")
+        self.vram_manager.cleanup()
+        logger.info("[low-vram-a2v] Phase 1 done: %.2fs", _time.perf_counter() - t_phase1)
+
+        # ============================================================
+        # Phase 1b: Audio encoding
+        # ============================================================
+        t_audio = _time.perf_counter()
+        logger.info("[low-vram-a2v] Phase 1b: Audio encoding")
+
+        decoded_audio = decode_audio_from_file(
+            audio_path, self.device, audio_start_time, audio_max_duration,
+        )
+        assert decoded_audio is not None, "Audio file contains no audio stream"
+
+        audio_encoder = self.model_ledger.audio_encoder()
+        self.vram_manager.ensure_on_gpu("audio_encoder", audio_encoder)
+        encoded_audio_latent = vae_encode_audio(decoded_audio, audio_encoder).to(
+            device=self.device, dtype=self.dtype,
+        )
+        # Keep the original waveform on CPU only; we only need it again at final mux.
+        decoded_audio = Audio(
+            waveform=decoded_audio.waveform.detach().cpu(),
+            sampling_rate=decoded_audio.sampling_rate,
+        )
+        audio_shape = AudioLatentShape.from_duration(
+            batch=1, duration=num_frames / frame_rate, channels=8, mel_bins=16,
+        )
+        target_frames = audio_shape.frames
+        if encoded_audio_latent.shape[2] < target_frames:
+            pad_size = target_frames - encoded_audio_latent.shape[2]
+            encoded_audio_latent = torch.nn.functional.pad(
+                encoded_audio_latent, (0, 0, 0, pad_size),
+            )
+        else:
+            encoded_audio_latent = encoded_audio_latent[:, :, :target_frames]
+
+        self.vram_manager.offload_to_cpu("audio_encoder", audio_encoder)
+        self.vram_manager.cleanup()
+        logger.info("[low-vram-a2v] Phase 1b done: %.2fs", _time.perf_counter() - t_audio)
+
+        # ============================================================
+        # Phase 2: Image conditioning (if i2v+a2v combo)
+        # ============================================================
+        target_output_shape = VideoPixelShape(
+            batch=1, frames=num_frames, width=width, height=height, fps=frame_rate,
+        )
+        stage_1_output_shape = VideoPixelShape(
+            batch=1, frames=num_frames, width=width // 2, height=height // 2, fps=frame_rate,
+        )
+
+        conditionings: list[Any] = []
+        if images:
+            t_phase2 = _time.perf_counter()
+            logger.info("[low-vram-a2v] Phase 2: Image conditioning")
+            if self._cached_video_encoder is None:
+                video_encoder = self.model_ledger.video_encoder()
+                self._cached_video_encoder = video_encoder
+            else:
+                video_encoder = self._cached_video_encoder
+            self.vram_manager.ensure_on_gpu("video_encoder", video_encoder)
+
+            ltx_images = [_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images]
+            conditionings = image_conditionings_by_replacing_latent(
+                images=ltx_images,
+                height=stage_1_output_shape.height,
+                width=stage_1_output_shape.width,
+                video_encoder=video_encoder,
+                dtype=self.dtype,
+                device=self.device,
+            )
+            self.vram_manager.offload_to_cpu("video_encoder", video_encoder)
+            self.vram_manager.cleanup()
+            logger.info("[low-vram-a2v] Phase 2 done: %.2fs", _time.perf_counter() - t_phase2)
+
+        # ============================================================
+        # Phase 3: Stage 1 denoising (half-resolution, frozen audio)
+        # ============================================================
+        t_phase3 = _time.perf_counter()
+        logger.info("[low-vram-a2v] Phase 3: Stage 1 denoising (half-res)")
+
+        if self._cached_transformer is None:
+            logger.info("[low-vram-a2v] Loading transformer from disk")
+            t_load = _time.perf_counter()
+            if self._use_gguf:
+                transformer = self._load_gguf_transformer()
+            else:
+                transformer = self.model_ledger.transformer()
+            logger.info("[low-vram-a2v] Transformer loaded: %.2fs", _time.perf_counter() - t_load)
+            self._cached_transformer = transformer
+        else:
+            transformer = self._cached_transformer
+
+        transformer, using_block_swap = self._prepare_a2v_transformer_for_denoise(transformer)
+        self._log_vram_usage("before Phase 3 denoise (a2v)")
+
+        # Respect the model type: distilled models use the baked-in
+        # distilled sigma schedule with no guidance.  Dev (non-distilled)
+        # models need the LTX2Scheduler sigmas and CFG/STG guidance —
+        # without this, dev models produce pure noise.
+        use_cfg = not self._is_distilled_mode()
+        if use_cfg:
+            from ltx_core.components.guiders import MultiModalGuiderFactory
+
+            dev_negative_prompt, video_guider_defaults, audio_guider_defaults = (
+                _get_official_dev_guidance_defaults()
+            )
+            # Re-encode negative prompt for CFG (text encoder was offloaded,
+            # but contexts are still on CPU from Phase 1).
+            stage_1_sigma_values = _make_dev_sigmas(self._num_inference_steps or 20)
+            stage_1_sigmas = torch.tensor(stage_1_sigma_values, dtype=torch.float32, device=self.device)
+            # Stage 2 always uses the distilled refinement schedule
+            stage_2_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
+
+            logger.info(
+                "[low-vram-a2v] Dev mode: %d-step Stage 1 + %d-step Stage 2, CFG=%.1f STG=%.1f",
+                len(stage_1_sigma_values) - 1,
+                len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1,
+                video_guider_defaults.cfg_scale,
+                video_guider_defaults.stg_scale,
+            )
+        else:
+            stage_1_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
+            stage_2_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
+
+        logger.warning(
+            "[a2v-debug] checkpoint=%s gguf=%s mode=%s stage1_sigma_len=%d",
+            self._checkpoint_path,
+            self._gguf_path,
+            "dev" if use_cfg else "distilled",
+            len(stage_1_sigmas),
+        )
+
+        total_steps = (len(stage_1_sigmas) - 1) + (len(stage_2_sigmas) - 1)
+        step_counter = [0]
+
+        # Negative prompt context is prepared in Phase 1 for dev mode to avoid
+        # reloading text encoder after transformer allocation.
+
+        def denoising_loop(
+            sigmas: torch.Tensor,
+            video_state: Any,
+            audio_state: Any,
+            stepper: EulerDiffusionStep,
+        ) -> tuple[Any, Any]:
+            if use_cfg and neg_video_context is not None:
+                video_guider_factory = MultiModalGuiderFactory.constant(
+                    video_guider_defaults,
+                    negative_context=neg_video_context,
+                )
+                audio_guider_factory = MultiModalGuiderFactory.constant(
+                    audio_guider_defaults,
+                    negative_context=neg_audio_context,
+                )
+                base_denoise = multi_modal_guider_factory_denoising_func(
+                    video_guider_factory=video_guider_factory,
+                    audio_guider_factory=audio_guider_factory,
+                    v_context=video_context,
+                    a_context=audio_context,
+                    transformer=transformer,
+                )
+            else:
+                base_denoise = simple_denoising_func(
+                    video_context=video_context,
+                    audio_context=audio_context,
+                    transformer=transformer,
+                )
+
+            def tracked_denoise(*args: Any, **kwargs: Any) -> Any:
+                result = base_denoise(*args, **kwargs)
+                step_counter[0] += 1
+                if progress_callback is not None:
+                    progress_callback(step_counter[0], total_steps)
+                return result
+
+            return euler_denoising_loop(
+                sigmas=sigmas,
+                video_state=video_state,
+                audio_state=audio_state,
+                stepper=stepper,
+                denoise_fn=tracked_denoise,
+            )
+
+        video_state = denoise_video_only(
+            output_shape=stage_1_output_shape,
+            conditionings=conditionings,
+            noiser=noiser,
+            sigmas=stage_1_sigmas,
+            stepper=stepper,
+            denoising_loop_fn=cast(Any, denoising_loop),
+            components=self.pipeline_components,
+            dtype=self.dtype,
+            device=self.device,
+            initial_audio_latent=encoded_audio_latent,
+        )
+        logger.info("[low-vram-a2v] Stage 1 done: %.2fs", _time.perf_counter() - t_phase3)
+
+        # Free stage-1-only data before the upscale pass.
+        del conditionings
+        video_context = video_context.to("cpu")
+        if audio_context is not None:
+            audio_context = audio_context.to("cpu")
+        encoded_audio_latent = encoded_audio_latent.to("cpu")
+        self.vram_manager.cleanup()
+
+        # ============================================================
+        # Phase 3b: Upsample + Stage 2 refinement (full-res)
+        # ============================================================
+        t_phase3b = _time.perf_counter()
+        logger.info("[low-vram-a2v] Phase 3b: Upscale + Stage 2 refinement")
+
+        # Offload transformer for upscale
+        if using_block_swap and self._block_swap_wrapper is not None:
+            self._block_swap_wrapper.offload_all()
+        else:
+            self.vram_manager.offload_to_cpu("transformer", transformer)
+        self.vram_manager.cleanup()
+
+        # Upscale
+        if self._cached_video_encoder is None:
+            video_encoder = self.model_ledger.video_encoder()
+            self._cached_video_encoder = video_encoder
+        else:
+            video_encoder = self._cached_video_encoder
+        self.vram_manager.ensure_on_gpu("video_encoder", video_encoder)
+
+        if self._cached_spatial_upsampler is None:
+            spatial_upsampler = self.model_ledger.spatial_upsampler()
+            self._cached_spatial_upsampler = spatial_upsampler
+        else:
+            spatial_upsampler = self._cached_spatial_upsampler
+        self.vram_manager.ensure_on_gpu("spatial_upsampler", spatial_upsampler)
+
+        upscaled_video_latent = upsample_video(
+            latent=video_state.latent[:1],
+            video_encoder=video_encoder,
+            upsampler=spatial_upsampler,
+        )
+        del video_state
+        self.vram_manager.cleanup()
+
+        # Image conditioning at full resolution
+        stage_2_conditionings: list[Any] = []
+        if images:
+            ltx_images = [_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images]
+            stage_2_conditionings = image_conditionings_by_replacing_latent(
+                images=ltx_images,
+                height=target_output_shape.height,
+                width=target_output_shape.width,
+                video_encoder=video_encoder,
+                dtype=self.dtype,
+                device=self.device,
+            )
+
+        self.vram_manager.offload_to_cpu("video_encoder", video_encoder)
+        self.vram_manager.offload_to_cpu("spatial_upsampler", spatial_upsampler)
+        self.vram_manager.cleanup()
+
+        # Bring frozen contexts/latents back only when refinement is ready to start.
+        video_context = video_context.to(device=self.device, dtype=self.dtype)
+        if audio_context is not None:
+            audio_context = audio_context.to(device=self.device, dtype=self.dtype)
+        encoded_audio_latent = encoded_audio_latent.to(device=self.device, dtype=self.dtype)
+        self.vram_manager.cleanup()
+
+        # Bring transformer back for stage 2
+        if using_block_swap and self._block_swap_wrapper is not None:
+            transformer = self._setup_block_swap_if_needed(transformer)
+            self._move_non_block_parts_to_gpu(transformer)
+        else:
+            self.vram_manager.ensure_on_gpu("transformer", transformer)
+        self.vram_manager.cleanup()
+
+        video_state = denoise_video_only(
+            output_shape=target_output_shape,
+            conditionings=stage_2_conditionings,
+            noiser=noiser,
+            sigmas=stage_2_sigmas,
+            stepper=stepper,
+            denoising_loop_fn=cast(Any, denoising_loop),
+            components=self.pipeline_components,
+            dtype=self.dtype,
+            device=self.device,
+            noise_scale=stage_2_sigmas[0].item(),
+            initial_video_latent=upscaled_video_latent,
+            initial_audio_latent=encoded_audio_latent,
+        )
+        logger.info("[low-vram-a2v] Phase 3b done: %.2fs", _time.perf_counter() - t_phase3b)
+
+        # Offload transformer
+        if using_block_swap and self._block_swap_wrapper is not None:
+            self._block_swap_wrapper.offload_all()
+        else:
+            self.vram_manager.offload_to_cpu("transformer", transformer)
+        self.vram_manager.cleanup()
+
+        # ============================================================
+        # Phase 4: VAE video decode + encode output
+        # ============================================================
+        t_phase4 = _time.perf_counter()
+        logger.info("[low-vram-a2v] Phase 4: VAE decode + output")
+        tiling_config = self._get_adaptive_tiling_config()
+
+        if self._cached_video_decoder is None:
+            video_decoder = self.model_ledger.video_decoder()
+            self._cached_video_decoder = video_decoder
+        else:
+            video_decoder = self._cached_video_decoder
+        self.vram_manager.ensure_on_gpu("video_decoder", video_decoder)
+
+        decoded_video = vae_decode_video(
+            video_state.latent, video_decoder, tiling_config,
+        )
+
+        # Use original audio (not VAE-decoded) for fidelity
+        max_samples = round(num_frames / frame_rate * decoded_audio.sampling_rate)
+        trimmed_waveform = decoded_audio.waveform.squeeze(0)[..., :max_samples]
+        original_audio = Audio(waveform=trimmed_waveform, sampling_rate=decoded_audio.sampling_rate)
+
+        chunks = video_chunks_number(num_frames, tiling_config)
+        encode_video_output(
+            video=decoded_video,
+            audio=original_audio,
+            fps=int(frame_rate),
+            output_path=output_path,
+            video_chunks_number_value=chunks,
+        )
+        self.vram_manager.offload_to_cpu("video_decoder", video_decoder)
+        self.vram_manager.cleanup()
+        logger.info("[low-vram-a2v] Phase 4 done: %.2fs", _time.perf_counter() - t_phase4)
+        logger.info("[low-vram-a2v] A2V generation complete: %s", output_path)
 
     # ------------------------------------------------------------------
     # Tiling configuration
