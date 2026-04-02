@@ -1623,14 +1623,6 @@ class LTXLowVRAMPipeline:
             stage_1_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
             stage_2_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
 
-        logger.warning(
-            "[a2v-debug] checkpoint=%s gguf=%s mode=%s stage1_sigma_len=%d",
-            self._checkpoint_path,
-            self._gguf_path,
-            "dev" if use_cfg else "distilled",
-            len(stage_1_sigmas),
-        )
-
         total_steps = (len(stage_1_sigmas) - 1) + (len(stage_2_sigmas) - 1)
         step_counter = [0]
 

@@ -12,8 +12,6 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 import gc
-import logging
-import os
 import torch
 
 from services.services_utils import AudioOrNone, TilingConfigType, sync_device
@@ -51,8 +49,6 @@ class DistilledA2VPipeline:
         self.device = device
         self.dtype = torch.bfloat16
         self._active_video_decoder: Any | None = None
-        self._debug_tensor_stats = os.getenv("LTX_A2V_DEBUG_TENSORS", "0") == "1"
-        self._debug_block_swap = os.getenv("LTX_A2V_DEBUG_BLOCK_SWAP", "0") == "1"
         self._block_swap_wrapper: Any | None = None
 
         self.model_ledger = ModelLedger(
@@ -143,29 +139,6 @@ class DistilledA2VPipeline:
                 if child is not inner:
                     child.to(self.device)
 
-    def _log_tensor_stats(self, name: str, tensor: torch.Tensor | None) -> None:
-        if not self._debug_tensor_stats or tensor is None:
-            return
-        logger = logging.getLogger(__name__)
-        try:
-            detached = tensor.detach()
-            stats_tensor = detached.float()
-            logger.info(
-                "[a2v-debug] %s shape=%s dtype=%s device=%s mean=%.6f std=%.6f min=%.6f max=%.6f nan=%s inf=%s",
-                name,
-                tuple(detached.shape),
-                detached.dtype,
-                detached.device,
-                stats_tensor.mean().item(),
-                stats_tensor.std().item(),
-                stats_tensor.min().item(),
-                stats_tensor.max().item(),
-                torch.isnan(stats_tensor).any().item(),
-                torch.isinf(stats_tensor).any().item(),
-            )
-        except Exception as exc:
-            logger.warning("[a2v-debug] failed to log %s stats: %s", name, exc)
-
     @torch.inference_mode()
     def __call__(
         self,
@@ -252,24 +225,9 @@ class DistilledA2VPipeline:
         # Shared denoising closure (simple, no guidance).
         video_encoder = self._ensure_on_device(self.model_ledger.video_encoder(), self.device)
         transformer = self.model_ledger.transformer()
-        if self._debug_block_swap:
-            logging.getLogger(__name__).info("[a2v-debug] enabling debug-only block swap path")
-            transformer = transformer.cpu()
-            sync_device(self.device)
-            self._cleanup_cuda()
-            transformer = self._setup_block_swap_if_needed(transformer)
-            if self._block_swap_wrapper is not None:
-                self._move_non_block_parts_to_gpu(transformer)
-            else:
-                transformer = self._ensure_on_device(transformer, self.device)
-        else:
-            transformer = self._ensure_on_device(transformer, self.device)
+        transformer = self._ensure_on_device(transformer, self.device)
 
         total_steps = (len(DISTILLED_SIGMA_VALUES) - 1) + (len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1)
-        self._log_tensor_stats("video_context", video_context)
-        self._log_tensor_stats("audio_context", audio_context)
-        self._log_tensor_stats("encoded_audio_latent", encoded_audio_latent)
-
         step_counter = [0]
 
         def denoising_loop(
