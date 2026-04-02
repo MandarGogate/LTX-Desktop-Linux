@@ -20,7 +20,11 @@ import { useProjects } from '../contexts/ProjectContext'
 import { useAppSettings } from '../contexts/AppSettingsContext'
 import { fileUrlToPath } from '../lib/url-to-path'
 import { sanitizeForcedApiVideoSettings } from '../lib/api-video-options'
-import { loadGenerationSettings, saveGenerationSettings } from '../lib/generation-settings-storage'
+import {
+  loadGenerationSettings,
+  normalizeVideoSettingsForCurrentBackend,
+  saveGenerationSettings,
+} from '../lib/generation-settings-storage'
 import { RetakePanel } from '../components/RetakePanel'
 import { ICLoraPanel, CONDITIONING_TYPES, type ICLoraConditioningType } from '../components/ICLoraPanel'
 
@@ -47,13 +51,16 @@ export function Playground() {
   const [prompt, setPrompt] = useState('')
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [selectedAudio, setSelectedAudio] = useState<string | null>(null)
-  const [settings, setSettings] = useState<GenerationSettings>(() => loadGenerationSettings(PLAYGROUND_SETTINGS_STORAGE_KEY, DEFAULT_SETTINGS))
+  const [settings, setSettings] = useState<GenerationSettings>(() => normalizeVideoSettingsForCurrentBackend(
+    loadGenerationSettings(PLAYGROUND_SETTINGS_STORAGE_KEY, DEFAULT_SETTINGS),
+    { forceApiVideo: shouldVideoGenerateWithLtxApi },
+  ))
 
   const { processStatus } = useBackend()
 
   useEffect(() => {
-    if (!shouldVideoGenerateWithLtxApi || mode === 'text-to-image') return
-    setSettings((prev) => sanitizeForcedApiVideoSettings({ ...prev, model: 'fast' }))
+    if (mode === 'text-to-image') return
+    setSettings((prev) => normalizeVideoSettingsForCurrentBackend(prev, { forceApiVideo: shouldVideoGenerateWithLtxApi }))
   }, [mode, shouldVideoGenerateWithLtxApi])
 
   useEffect(() => {
@@ -62,14 +69,14 @@ export function Playground() {
     }
   }, [forceApiGenerations, mode])
 
-  // Force pro model + resolution when audio is attached (A2V only supports pro @ 1080p 16:9)
+  // Keep the selected model for A2V; only clamp API-only dimensions when needed.
   useEffect(() => {
     if (selectedAudio && mode !== 'text-to-image') {
       setSettings(prev => {
         if (shouldVideoGenerateWithLtxApi) {
-          return sanitizeForcedApiVideoSettings({ ...prev, model: 'pro' }, { hasAudio: true })
+          return sanitizeForcedApiVideoSettings(prev, { hasAudio: true })
         }
-        return prev.model !== 'pro' ? { ...prev, model: 'pro' } : prev
+        return prev
       })
     }
   }, [mode, selectedAudio, shouldVideoGenerateWithLtxApi]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -168,12 +175,11 @@ export function Playground() {
     } else {
       const effectiveVideoSettings = shouldVideoGenerateWithLtxApi
         ? sanitizeForcedApiVideoSettings(settings)
-        : settings
+        : normalizeVideoSettingsForCurrentBackend(settings, { forceApiVideo: false })
       // Auto-detect: if image is loaded → I2V, otherwise → T2V
       if (!prompt.trim()) return
       const imagePath = selectedImage ? fileUrlToPath(selectedImage) : null
       const audioPath = selectedAudio ? fileUrlToPath(selectedAudio) : null
-      if (audioPath) effectiveVideoSettings.model = 'pro'
       generate(prompt, imagePath, effectiveVideoSettings, audioPath)
     }
   }

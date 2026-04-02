@@ -249,6 +249,7 @@ class LTXLowVRAMPipeline:
         num_inference_steps: int | None = None,
         text_encoder_variant_path: str | None = None,
         use_upscaler: bool = False,
+        a2v_decode_tiling: str = "auto",
     ) -> "LTXLowVRAMPipeline":
         return LTXLowVRAMPipeline(
             checkpoint_path=checkpoint_path,
@@ -264,6 +265,7 @@ class LTXLowVRAMPipeline:
             num_inference_steps=num_inference_steps,
             text_encoder_variant_path=text_encoder_variant_path,
             use_upscaler=use_upscaler,
+            a2v_decode_tiling=a2v_decode_tiling,
         )
 
     def __init__(
@@ -282,6 +284,7 @@ class LTXLowVRAMPipeline:
         num_inference_steps: int | None = None,
         text_encoder_variant_path: str | None = None,
         use_upscaler: bool = False,
+        a2v_decode_tiling: str = "auto",
     ) -> None:
         import torch as _torch
 
@@ -300,6 +303,7 @@ class LTXLowVRAMPipeline:
         self._num_inference_steps = num_inference_steps
         self._text_encoder_variant_path = text_encoder_variant_path
         self._use_upscaler = use_upscaler
+        self._a2v_decode_tiling = a2v_decode_tiling
 
         # Create default VRAMManager if not provided
         if vram_manager is None:
@@ -619,6 +623,8 @@ class LTXLowVRAMPipeline:
             blocks_to_keep_on_gpu=blocks_on_gpu,
             prefetch_distance=2,
         )
+        self._block_swap_wrapper._default_blocks_to_keep_on_gpu = blocks_on_gpu  # type: ignore[attr-defined]
+        self._block_swap_wrapper._default_prefetch_distance = 2  # type: ignore[attr-defined]
 
         if self._block_swap_wrapper.block_count == 0:
             logger.warning("Block swap found 0 blocks — falling back to sequential offloading")
@@ -666,6 +672,55 @@ class LTXLowVRAMPipeline:
 
         self.vram_manager.cleanup()
         return transformer, using_block_swap
+
+    def _should_use_conservative_a2v_stage2_block_swap(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        frame_rate: float,
+    ) -> bool:
+        duration_seconds = num_frames / max(frame_rate, 1.0)
+        return max(width, height) >= 1920 and duration_seconds > 5.0
+
+    def _set_block_swap_runtime_policy(
+        self,
+        *,
+        blocks_to_keep_on_gpu: int,
+        prefetch_distance: int,
+        reason: str,
+    ) -> None:
+        wrapper = self._block_swap_wrapper
+        if wrapper is None:
+            return
+        wrapper.blocks_to_keep_on_gpu = max(0, min(blocks_to_keep_on_gpu, wrapper.block_count))
+        wrapper.prefetch_distance = max(1, prefetch_distance)
+        wrapper.offload_all()
+        wrapper.restore_gpu_blocks()
+        logger.info(
+            "Adjusted block swap runtime policy: keeping %d blocks on GPU, prefetch_distance=%d (%s)",
+            wrapper.blocks_to_keep_on_gpu,
+            wrapper.prefetch_distance,
+            reason,
+        )
+
+    def _restore_default_block_swap_runtime_policy(self) -> None:
+        wrapper = self._block_swap_wrapper
+        if wrapper is None:
+            return
+        default_blocks = getattr(wrapper, "_default_blocks_to_keep_on_gpu", wrapper.blocks_to_keep_on_gpu)
+        default_prefetch = getattr(wrapper, "_default_prefetch_distance", wrapper.prefetch_distance)
+        if (
+            wrapper.blocks_to_keep_on_gpu == default_blocks
+            and wrapper.prefetch_distance == default_prefetch
+        ):
+            return
+        self._set_block_swap_runtime_policy(
+            blocks_to_keep_on_gpu=int(default_blocks),
+            prefetch_distance=int(default_prefetch),
+            reason="restore-default",
+        )
 
     def _load_gguf_transformer(self) -> Any:
         """Load transformer from GGUF file instead of safetensors.
@@ -1298,7 +1353,7 @@ class LTXLowVRAMPipeline:
         # ============================================================
         t_phase4 = _time.perf_counter()
         logger.info("[low-vram] Phase 4: VAE video decode")
-        tiling_config = self._get_adaptive_tiling_config()
+        tiling_config = self._get_a2v_decode_tiling_config()
 
         if self._cached_video_decoder is None:
             video_decoder = self.model_ledger.video_decoder()
@@ -1757,6 +1812,17 @@ class LTXLowVRAMPipeline:
 
         # Bring transformer back for stage 2
         if using_block_swap and self._block_swap_wrapper is not None:
+            if self._should_use_conservative_a2v_stage2_block_swap(
+                width=width,
+                height=height,
+                num_frames=num_frames,
+                frame_rate=frame_rate,
+            ):
+                self._set_block_swap_runtime_policy(
+                    blocks_to_keep_on_gpu=1,
+                    prefetch_distance=1,
+                    reason="a2v-stage2-1080p-long",
+                )
             transformer = self._setup_block_swap_if_needed(transformer)
             self._move_non_block_parts_to_gpu(transformer)
         else:
@@ -1782,6 +1848,7 @@ class LTXLowVRAMPipeline:
         # Offload transformer
         if using_block_swap and self._block_swap_wrapper is not None:
             self._block_swap_wrapper.offload_all()
+            self._restore_default_block_swap_runtime_policy()
         else:
             self.vram_manager.offload_to_cpu("transformer", transformer)
         self.vram_manager.cleanup()
@@ -1826,7 +1893,7 @@ class LTXLowVRAMPipeline:
     # Tiling configuration
     # ------------------------------------------------------------------
 
-    def _get_adaptive_tiling_config(self) -> Any:
+    def _build_tiling_config_for_tier(self, tier: Any) -> Any:
         from ltx_core.model.video_vae import (
             SpatialTilingConfig,
             TemporalTilingConfig,
@@ -1835,7 +1902,7 @@ class LTXLowVRAMPipeline:
 
         from services.vram_manager.vram_manager import VRAMTier
 
-        match self.vram_manager.tier:
+        match tier:
             case VRAMTier.HIGH:
                 return TilingConfig(
                     spatial_config=SpatialTilingConfig(
@@ -1869,6 +1936,29 @@ class LTXLowVRAMPipeline:
                         tile_overlap_in_frames=8,
                     ),
                 )
+
+    def _get_adaptive_tiling_config(self) -> Any:
+        return self._build_tiling_config_for_tier(self.vram_manager.tier)
+
+    def _get_a2v_decode_tiling_config(self) -> Any:
+        from services.vram_manager.vram_manager import VRAMTier
+
+        override = self._a2v_decode_tiling
+        if override == "none":
+            logger.info("[low-vram-a2v] Decode tiling override: none")
+            return None
+
+        tier_overrides: dict[str, VRAMTier] = {
+            "high": VRAMTier.HIGH,
+            "medium": VRAMTier.MEDIUM,
+            "low": VRAMTier.LOW,
+            "very_low": VRAMTier.VERY_LOW,
+        }
+        if override in tier_overrides:
+            logger.info("[low-vram-a2v] Decode tiling override: %s", override)
+            return self._build_tiling_config_for_tier(tier_overrides[override])
+
+        return self._get_adaptive_tiling_config()
 
     # ------------------------------------------------------------------
     # Transformer non-block GPU placement

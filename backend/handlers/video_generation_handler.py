@@ -47,7 +47,7 @@ FORCED_API_RESOLUTION_MAP: dict[str, dict[str, str]] = {
     "1440p": {"16:9": "2560x1440", "9:16": "1440x2560"},
     "2160p": {"16:9": "3840x2160", "9:16": "2160x3840"},
 }
-A2V_FORCED_API_RESOLUTION = "1920x1080"
+A2V_FORCED_API_RESOLUTION_LABEL = "1080p"
 FORCED_API_ALLOWED_ASPECT_RATIOS = {"16:9", "9:16"}
 FORCED_API_ALLOWED_FPS = {24, 25, 48, 50}
 
@@ -326,12 +326,26 @@ class VideoGenerationHandler(StateHandlerBase):
         validated_audio_path = validate_audio_file(audio_path)
         audio_path_str = str(validated_audio_path)
 
-        RESOLUTION_MAP: dict[str, tuple[int, int]] = {
+        resolution_map_16_9: dict[str, tuple[int, int]] = {
             "540p": (960, 576),
             "720p": (1280, 704),
             "1080p": (1920, 1088),
         }
-        width, height = RESOLUTION_MAP.get(req.resolution, (960, 576))
+
+        def get_16_9_size(resolution: str) -> tuple[int, int]:
+            return resolution_map_16_9.get(resolution, (960, 576))
+
+        def get_9_16_size(resolution: str) -> tuple[int, int]:
+            width_16_9, height_16_9 = get_16_9_size(resolution)
+            return height_16_9, width_16_9
+
+        match req.aspectRatio:
+            case "9:16":
+                width, height = get_9_16_size(req.resolution)
+            case "16:9":
+                width, height = get_16_9_size(req.resolution)
+            case _:
+                raise HTTPError(400, f"Unsupported aspect ratio: {req.aspectRatio}")
 
         num_frames = self._compute_num_frames(duration, fps)
 
@@ -528,13 +542,14 @@ class VideoGenerationHandler(StateHandlerBase):
                         requested_model,
                     )
                 api_model_id = FORCED_API_MODEL_MAP["pro"]
-                if api_resolution != A2V_FORCED_API_RESOLUTION:
+                forced_api_resolution = FORCED_API_RESOLUTION_MAP[A2V_FORCED_API_RESOLUTION_LABEL][aspect_ratio]
+                if api_resolution != forced_api_resolution:
                     logger.warning(
                         "A2V requested with resolution=%s; overriding to '%s'",
                         api_resolution,
-                        A2V_FORCED_API_RESOLUTION,
+                        forced_api_resolution,
                     )
-                api_resolution = A2V_FORCED_API_RESOLUTION
+                api_resolution = forced_api_resolution
                 validated_audio_path = validate_audio_file(audio_path)
                 validated_image_path: Path | None = None
                 if image_path is not None:

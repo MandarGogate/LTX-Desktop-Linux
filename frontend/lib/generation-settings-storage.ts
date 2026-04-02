@@ -1,4 +1,5 @@
 import type { GenerationSettings } from '../components/SettingsPanel'
+import { sanitizeForcedApiVideoSettings } from './api-video-options'
 
 function isGenerationSettings(value: unknown): value is GenerationSettings {
   if (!value || typeof value !== 'object') return false
@@ -26,6 +27,25 @@ export function loadGenerationSettings(key: string, defaults: GenerationSettings
   } catch {
     return { ...defaults }
   }
+}
+
+export function normalizeVideoSettingsForCurrentBackend(
+  settings: GenerationSettings,
+  options: { forceApiVideo: boolean },
+): GenerationSettings {
+  if (options.forceApiVideo) {
+    return sanitizeForcedApiVideoSettings(settings)
+  }
+
+  if (settings.model === 'quality') {
+    return { ...settings, model: 'balanced' }
+  }
+
+  if (settings.model === 'pro') {
+    return { ...settings, model: 'fast' }
+  }
+
+  return settings
 }
 
 export function saveGenerationSettings(key: string, settings: GenerationSettings): void {

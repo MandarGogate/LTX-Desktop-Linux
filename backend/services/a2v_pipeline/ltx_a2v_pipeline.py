@@ -31,6 +31,7 @@ class LTXa2vPipeline:
         num_inference_steps: int | None = None,
         text_encoder_variant_path: str | None = None,
         use_upscaler: bool = False,
+        a2v_decode_tiling: str = "auto",
     ) -> "LTXa2vPipeline":
         return LTXa2vPipeline(
             checkpoint_path=checkpoint_path,
@@ -46,6 +47,7 @@ class LTXa2vPipeline:
             num_inference_steps=num_inference_steps,
             text_encoder_variant_path=text_encoder_variant_path,
             use_upscaler=use_upscaler,
+            a2v_decode_tiling=a2v_decode_tiling,
         )
 
     def __init__(
@@ -64,6 +66,7 @@ class LTXa2vPipeline:
         num_inference_steps: int | None = None,
         text_encoder_variant_path: str | None = None,
         use_upscaler: bool = False,
+        a2v_decode_tiling: str = "auto",
     ) -> None:
         from services.fast_video_pipeline.ltx_low_vram_pipeline import (
             LTXLowVRAMPipeline,
@@ -83,6 +86,7 @@ class LTXa2vPipeline:
             num_inference_steps=num_inference_steps,
             text_encoder_variant_path=text_encoder_variant_path,
             use_upscaler=use_upscaler,
+            a2v_decode_tiling=a2v_decode_tiling,
         )
 
     @torch.inference_mode()

@@ -83,6 +83,7 @@ class SelectedLoRASettings(SettingsBaseModel):
 
 
 RunModeLiteral = Literal["auto", "high_vram", "medium_vram", "low_vram", "very_low_vram"]
+A2VDecodeTilingLiteral = Literal["auto", "high", "medium", "low", "very_low", "none"]
 
 
 class AppSettings(SettingsBaseModel):
@@ -110,6 +111,7 @@ class AppSettings(SettingsBaseModel):
     preferred_lora_strength: float = 0.8
     num_blocks_to_swap: int = -1
     run_mode: RunModeLiteral = "auto"
+    a2v_decode_tiling: A2VDecodeTilingLiteral = "auto"
     preferred_zit_model_path: str = ""
     preferred_text_encoder_path: str = ""
 
@@ -209,6 +211,7 @@ class SettingsResponse(SettingsBaseModel):
     preferred_lora_strength: float = 0.8
     num_blocks_to_swap: int = -1
     run_mode: RunModeLiteral = "auto"
+    a2v_decode_tiling: A2VDecodeTilingLiteral = "auto"
     preferred_zit_model_path: str = ""
     preferred_text_encoder_path: str = ""
 

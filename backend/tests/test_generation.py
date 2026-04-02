@@ -342,6 +342,30 @@ class TestA2VGenerate:
             assert call["width"] == expected_w, f"{resolution}: expected width {expected_w}, got {call['width']}"
             assert call["height"] == expected_h, f"{resolution}: expected height {expected_h}, got {call['height']}"
 
+    def test_a2v_supports_portrait_9_16_resolution_map(self, client, test_state, fake_services, create_fake_model_files, tmp_path):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+        audio_file = tmp_path / "test_audio.wav"
+        _write_test_wav(audio_file)
+
+        r = client.post(
+            "/api/generate",
+            json={
+                "prompt": "A portrait music video",
+                "resolution": "1080p",
+                "aspectRatio": "9:16",
+                "model": "fast",
+                "duration": "2",
+                "fps": "24",
+                "audioPath": str(audio_file),
+            },
+        )
+
+        assert r.status_code == 200
+        call = fake_services.a2v_pipeline.generate_calls[0]
+        assert call["width"] == 1088
+        assert call["height"] == 1920
+
     def test_a2v_fast_prefers_distilled_model_without_lora(self, client, test_state, fake_services, create_fake_model_files, tmp_path):
         create_fake_model_files()
         _enable_local_text_encoding(test_state)
@@ -391,6 +415,44 @@ class TestA2VGenerate:
         assert create_call["lora_path"] == str(distilled_lora)
         assert create_call["lora_strength"] == 0.6
         assert create_call["num_inference_steps"] == 8
+
+    def test_a2v_fast_reloads_pipeline_after_quality(self, client, test_state, fake_services, create_fake_model_files, tmp_path):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+        _configure_a2v_fast_distilled_inputs(test_state)
+        audio_file = tmp_path / "test_audio.wav"
+        _write_test_wav(audio_file)
+
+        quality = client.post(
+            "/api/generate",
+            json={
+                "prompt": "A music video",
+                "model": "pro",
+                "duration": "2",
+                "fps": "24",
+                "audioPath": str(audio_file),
+            },
+        )
+        assert quality.status_code == 200
+
+        fast = client.post(
+            "/api/generate",
+            json={
+                "prompt": "A music video",
+                "model": "fast",
+                "duration": "2",
+                "fps": "24",
+                "audioPath": str(audio_file),
+            },
+        )
+
+        assert fast.status_code == 200
+        assert len(fake_services.a2v_pipeline.create_calls) == 2
+        fast_create_call = fake_services.a2v_pipeline.create_calls[1]
+        assert fast_create_call["gguf_path"] is not None
+        assert "distilled" in fast_create_call["gguf_path"].lower()
+        assert fast_create_call["lora_path"] is None
+        assert fast_create_call["num_inference_steps"] == 8
 
 class TestGenerateCancel:
     def test_cancel_active(self, client, test_state):
@@ -516,4 +578,3 @@ class TestEmptyPromptRejected:
     def test_missing_image_prompt_rejected(self, client):
         r = client.post("/api/generate-image", json={})
         assert r.status_code == 422
-

@@ -678,6 +678,7 @@ class PipelinesHandler(StateHandlerBase):
             use_upscaler = self.state.app_settings.pro_model.use_upscaler
         else:
             use_upscaler = self.state.app_settings.custom_model.use_upscaler
+        a2v_decode_tiling = self.state.app_settings.a2v_decode_tiling
 
         pipeline = LTXLowVRAMPipeline.create(
             checkpoint_path,
@@ -968,13 +969,6 @@ class PipelinesHandler(StateHandlerBase):
     def load_a2v_pipeline(self, model_type: VideoPipelineModelType = "quality") -> A2VPipelineState:
         self._install_text_patches_if_needed()
 
-        with self._lock:
-            match self.state.gpu_slot:
-                case GpuSlot(active_pipeline=A2VPipelineState() as state):
-                    return state
-                case _:
-                    pass
-
         self._evict_gpu_pipeline_for_swap()
 
         vram_gb = 0
@@ -1067,6 +1061,32 @@ class PipelinesHandler(StateHandlerBase):
             use_upscaler = self.state.app_settings.pro_model.use_upscaler
         else:
             use_upscaler = self.state.app_settings.custom_model.use_upscaler
+        a2v_decode_tiling = self.state.app_settings.a2v_decode_tiling
+
+        with self._lock:
+            match self.state.gpu_slot:
+                case GpuSlot(
+                    active_pipeline=A2VPipelineState(
+                        model_type=current_model_type,
+                        checkpoint_path=current_checkpoint_path,
+                        gguf_path=current_gguf_path,
+                        lora_path=current_lora_path,
+                        num_inference_steps=current_num_inference_steps,
+                        use_upscaler=current_use_upscaler,
+                        a2v_decode_tiling=current_a2v_decode_tiling,
+                    ) as state
+                ) if (
+                    current_model_type == model_type
+                    and current_checkpoint_path == checkpoint_path
+                    and current_gguf_path == gguf_path_for_mode
+                    and current_lora_path == primary_lora_path
+                    and current_num_inference_steps == num_inference_steps
+                    and current_use_upscaler == use_upscaler
+                    and current_a2v_decode_tiling == a2v_decode_tiling
+                ):
+                    return state
+                case _:
+                    pass
 
         pipeline = self._a2v_pipeline_class.create(
             checkpoint_path,
@@ -1082,8 +1102,18 @@ class PipelinesHandler(StateHandlerBase):
             num_inference_steps=num_inference_steps,
             text_encoder_variant_path=text_encoder_variant_path,
             use_upscaler=use_upscaler,
+            a2v_decode_tiling=a2v_decode_tiling,
         )
-        state = A2VPipelineState(pipeline=pipeline)
+        state = A2VPipelineState(
+            pipeline=pipeline,
+            model_type=model_type,
+            checkpoint_path=checkpoint_path,
+            gguf_path=gguf_path_for_mode,
+            lora_path=primary_lora_path,
+            num_inference_steps=num_inference_steps,
+            use_upscaler=use_upscaler,
+            a2v_decode_tiling=a2v_decode_tiling,
+        )
 
         with self._lock:
             self.state.gpu_slot = GpuSlot(active_pipeline=state, generation=None)

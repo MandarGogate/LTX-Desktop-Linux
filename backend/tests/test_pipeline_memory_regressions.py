@@ -110,12 +110,88 @@ def _hook_counts(module: nn.Module) -> tuple[int, int]:
 class _WrapperStub:
     def __init__(self) -> None:
         self.offload_all_calls = 0
+        self.restore_gpu_blocks_calls = 0
+        self.blocks_to_keep_on_gpu = 2
+        self.prefetch_distance = 2
+        self._default_blocks_to_keep_on_gpu = 2
+        self._default_prefetch_distance = 2
+        self._blocks = [object(), object(), object()]
 
     def offload_all(self) -> None:
         self.offload_all_calls += 1
 
+    def restore_gpu_blocks(self) -> None:
+        self.restore_gpu_blocks_calls += 1
+
+    @property
+    def block_count(self) -> int:
+        return len(self._blocks)
+
 
 class TestLowVRAMPipelineRegressions:
+    def test_a2v_stage2_conservative_policy_triggers_for_1080p_longer_than_5s(self) -> None:
+        pipeline = object.__new__(LTXLowVRAMPipeline)
+
+        assert pipeline._should_use_conservative_a2v_stage2_block_swap(
+            width=1920,
+            height=1088,
+            num_frames=145,
+            frame_rate=24,
+        )
+
+    def test_a2v_stage2_conservative_policy_skips_shorter_runs(self) -> None:
+        pipeline = object.__new__(LTXLowVRAMPipeline)
+
+        assert not pipeline._should_use_conservative_a2v_stage2_block_swap(
+            width=1920,
+            height=1088,
+            num_frames=120,
+            frame_rate=24,
+        )
+
+    def test_block_swap_runtime_policy_restores_defaults(self) -> None:
+        pipeline = object.__new__(LTXLowVRAMPipeline)
+        wrapper = _WrapperStub()
+        pipeline._block_swap_wrapper = wrapper
+
+        pipeline._set_block_swap_runtime_policy(
+            blocks_to_keep_on_gpu=1,
+            prefetch_distance=1,
+            reason="test",
+        )
+
+        assert wrapper.blocks_to_keep_on_gpu == 1
+        assert wrapper.prefetch_distance == 1
+        assert wrapper.offload_all_calls == 1
+        assert wrapper.restore_gpu_blocks_calls == 1
+
+        pipeline._restore_default_block_swap_runtime_policy()
+
+        assert wrapper.blocks_to_keep_on_gpu == 2
+        assert wrapper.prefetch_distance == 2
+        assert wrapper.offload_all_calls == 2
+        assert wrapper.restore_gpu_blocks_calls == 2
+
+    def test_a2v_decode_tiling_override_none_disables_tiling(self) -> None:
+        pipeline = object.__new__(LTXLowVRAMPipeline)
+        pipeline.vram_manager = _DummyVRAMManager(tier=VRAMTier.VERY_LOW)
+        pipeline._a2v_decode_tiling = "none"
+
+        assert pipeline._get_a2v_decode_tiling_config() is None
+
+    def test_a2v_decode_tiling_override_high_uses_high_tier_tiles(self) -> None:
+        pipeline = object.__new__(LTXLowVRAMPipeline)
+        pipeline.vram_manager = _DummyVRAMManager(tier=VRAMTier.VERY_LOW)
+        pipeline._a2v_decode_tiling = "high"
+
+        tiling = pipeline._get_a2v_decode_tiling_config()
+
+        assert tiling is not None
+        assert tiling.spatial_config.tile_size_in_pixels == 384
+        assert tiling.spatial_config.tile_overlap_in_pixels == 64
+        assert tiling.temporal_config.tile_size_in_frames == 48
+        assert tiling.temporal_config.tile_overlap_in_frames == 8
+
     def test_split_video_vae_decoder_sd_ops_accepts_split_layout(self) -> None:
         sd_ops = _build_split_video_vae_sd_ops("decoder")
 

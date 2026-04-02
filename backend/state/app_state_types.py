@@ -116,6 +116,13 @@ class ICLoraState:
 @dataclass
 class A2VPipelineState:
     pipeline: A2VPipeline
+    model_type: str
+    checkpoint_path: str
+    gguf_path: str | None
+    lora_path: str | None
+    num_inference_steps: int | None
+    use_upscaler: bool
+    a2v_decode_tiling: str
 
 
 @dataclass

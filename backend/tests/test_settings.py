@@ -33,6 +33,7 @@ class TestGetSettings:
         assert data["seedLocked"] is False
         assert data["lockedSeed"] == 42
         assert data["modelsDir"] == ""
+        assert data["a2vDecodeTiling"] == "auto"
         assert "ltxApiKey" not in data
         assert "falApiKey" not in data
         assert "geminiApiKey" not in data
@@ -85,6 +86,11 @@ class TestPostSettings:
         assert r.status_code == 200
         assert test_state.state.app_settings.custom_model.steps == 12
         assert test_state.state.app_settings.custom_model.use_upscaler is False
+
+    def test_update_a2v_decode_tiling(self, client, test_state):
+        r = client.post("/api/settings", json={"a2vDecodeTiling": "none"})
+        assert r.status_code == 200
+        assert test_state.state.app_settings.a2v_decode_tiling == "none"
 
     def test_prompt_cache_size_clamped_max(self, client, test_state):
         r = client.post("/api/settings", json={"promptCacheSize": 5000})

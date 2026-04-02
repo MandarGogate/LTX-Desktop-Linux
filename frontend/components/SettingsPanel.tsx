@@ -126,7 +126,7 @@ export function SettingsPanel({
           onChange={(e) => handleChange('model', e.target.value)}
           disabled={disabled}
         >
-          <option value="fast" disabled={hasAudio}>LTX-2.3 Fast (API)</option>
+          <option value="fast">LTX-2.3 Fast (API)</option>
           <option value="pro">LTX-2.3 Pro (API)</option>
         </Select>
       )}
@@ -180,14 +180,10 @@ export function SettingsPanel({
         onChange={(e) => handleChange('aspectRatio', e.target.value)}
         disabled={disabled}
       >
-        {hasAudio ? (
+        <>
           <option value="16:9">16:9 Landscape</option>
-        ) : (
-          <>
-            <option value="16:9">16:9 Landscape</option>
-            <option value="9:16">9:16 Portrait</option>
-          </>
-        )}
+          <option value="9:16">9:16 Portrait</option>
+        </>
       </Select>
 
       {/* Audio and Camera Motion Row */}

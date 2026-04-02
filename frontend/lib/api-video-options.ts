@@ -11,7 +11,6 @@ export type ForcedApiVideoModel = (typeof FORCED_API_VIDEO_MODELS)[number]
 export type ForcedApiVideoAspectRatio = (typeof FORCED_API_VIDEO_ASPECT_RATIOS)[number]
 
 export const A2V_FORCED_RESOLUTION: ForcedApiVideoResolution = '1080p'
-export const A2V_FORCED_ASPECT_RATIO: ForcedApiVideoAspectRatio = '16:9'
 
 type ForcedVideoSettingsShape = {
   model: string
@@ -85,9 +84,7 @@ export function sanitizeForcedApiVideoSettings<T extends ForcedVideoSettingsShap
   let nextAspectRatio = normalizeForcedAspectRatio(settings.aspectRatio)
 
   if (options?.hasAudio) {
-    nextModel = 'pro'
     nextResolution = A2V_FORCED_RESOLUTION
-    nextAspectRatio = A2V_FORCED_ASPECT_RATIO
   }
 
   const nextFps = normalizeForcedFps(settings.fps)

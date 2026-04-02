@@ -689,6 +689,7 @@ class FakeA2VPipeline:
         num_inference_steps: int | None = None,
         text_encoder_variant_path: str | None = None,
         use_upscaler: bool = False,
+        a2v_decode_tiling: str = "auto",
     ) -> "FakeA2VPipeline":
         pipeline = FakeA2VPipeline._singleton
         if pipeline is None:
@@ -708,6 +709,7 @@ class FakeA2VPipeline:
                 "num_inference_steps": num_inference_steps,
                 "text_encoder_variant_path": text_encoder_variant_path,
                 "use_upscaler": use_upscaler,
+                "a2v_decode_tiling": a2v_decode_tiling,
             }
         )
         return pipeline

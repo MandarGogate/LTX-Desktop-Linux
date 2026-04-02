@@ -28,6 +28,7 @@ class A2VPipeline(Protocol):
         num_inference_steps: int | None = None,
         text_encoder_variant_path: str | None = None,
         use_upscaler: bool = False,
+        a2v_decode_tiling: str = "auto",
     ) -> "A2VPipeline": ...
 
     def generate(

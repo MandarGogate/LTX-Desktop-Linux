@@ -23,7 +23,13 @@ import {
   getAllowedForcedApiDurations,
   sanitizeForcedApiVideoSettings,
 } from '../lib/api-video-options'
-import { loadGenerationSettings, loadStringSetting, saveGenerationSettings, saveStringSetting } from '../lib/generation-settings-storage'
+import {
+  loadGenerationSettings,
+  loadStringSetting,
+  normalizeVideoSettingsForCurrentBackend,
+  saveGenerationSettings,
+  saveStringSetting,
+} from '../lib/generation-settings-storage'
 import { logger } from '../lib/logger'
 import { persistSelectableFile } from '../lib/web-file-upload'
 import { RetakePanel } from '../components/RetakePanel'
@@ -734,13 +740,10 @@ function PromptBar({
               title="ASPECT RATIO"
               value={settings.aspectRatio || '16:9'}
               onChange={(v) => onSettingsChange({ ...settings, aspectRatio: v })}
-              options={inputAudio
-                ? [{ value: '16:9', label: '16:9' }]
-                : [
-                    { value: '16:9', label: '16:9' },
-                    { value: '9:16', label: '9:16' },
-                  ]
-              }
+              options={[
+                { value: '16:9', label: '16:9' },
+                { value: '9:16', label: '9:16' },
+              ]}
               trigger={
                 <>
                   <AspectIcon className="h-3.5 w-3.5" />
@@ -916,14 +919,20 @@ export function GenSpace() {
       conditioningStrength: number
     }
   } | null>(null)
-  const [settings, setSettings] = useState<GenerationSettings>(() => loadGenerationSettings(
-    GENSPACE_SETTINGS_STORAGE_KEY,
-    DEFAULT_VIDEO_SETTINGS,
+  const [settings, setSettings] = useState<GenerationSettings>(() => normalizeVideoSettingsForCurrentBackend(
+    loadGenerationSettings(
+      GENSPACE_SETTINGS_STORAGE_KEY,
+      DEFAULT_VIDEO_SETTINGS,
+    ),
+    { forceApiVideo: shouldVideoGenerateWithLtxApi },
   ))
   const [cameraMotion, setCameraMotion] = useState(() => loadStringSetting(GENSPACE_CAMERA_MOTION_STORAGE_KEY, 'none'))
   const applyForcedVideoSettings = useCallback(
     (next: GenerationSettings) => {
-      if (!shouldVideoGenerateWithLtxApi || mode !== 'video') return next
+      if (mode !== 'video') return next
+      if (!shouldVideoGenerateWithLtxApi) {
+        return normalizeVideoSettingsForCurrentBackend(next, { forceApiVideo: false })
+      }
       return sanitizeForcedApiVideoSettings(next, { hasAudio: !!inputAudio })
     },
     [inputAudio, mode, shouldVideoGenerateWithLtxApi],
@@ -1088,10 +1097,10 @@ export function GenSpace() {
     }
   }, [icLoraError])
 
-  // Force pro model + resolution when audio is attached (A2V only supports pro @ 1080p 16:9)
+  // Keep the selected model for A2V; only clamp geometry needed by the active path.
   useEffect(() => {
     if (inputAudio) {
-      setSettings(prev => applyForcedVideoSettings({ ...prev, model: 'pro', aspectRatio: '16:9' }))
+      setSettings(prev => applyForcedVideoSettings(prev))
     }
   }, [inputAudio]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1387,7 +1396,6 @@ export function GenSpace() {
       const audioPath = inputAudio ? fileUrlToPath(inputAudio) : null
       const videoSettings = applyForcedVideoSettings(settings)
       if (videoSettings.model === 'quality') videoSettings.model = 'balanced'
-      if (audioPath) videoSettings.model = 'pro'
 
         generate(
         prompt,
