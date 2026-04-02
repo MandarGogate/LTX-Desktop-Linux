@@ -69,6 +69,11 @@ backend/models/
 backend/outputs/*.mp4
 backend/outputs/*.png
 backend/generated/
+backend/.appdata/
+backend/_bench_quant/
+
+# Lockfiles not used by this pnpm workspace
+package-lock.json
 
 # Build artifacts
 release/
