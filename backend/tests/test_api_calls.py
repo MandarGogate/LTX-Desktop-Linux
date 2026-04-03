@@ -235,6 +235,31 @@ class TestRetake:
         assert retake_call["regenerate_video"] is True
         assert retake_call["regenerate_audio"] is False
 
+    def test_local_retake_resolution_resizes_input(self, client, test_state, create_fake_model_files, fake_services):
+        create_fake_model_files(include_zit=False)
+        test_state.state.app_settings.use_local_text_encoder = True
+        test_state.config.force_api_generations = False
+
+        video_path = self._make_valid_video(test_state, width=384, height=224, frames=9)
+        r = client.post(
+            "/api/retake",
+            json={
+                "video_path": video_path,
+                "start_time": 0.0,
+                "duration": 3.0,
+                "prompt": "cinematic station platform",
+                "mode": "replace_audio_and_video",
+                "resolution": "720p",
+            },
+        )
+        assert r.status_code == 200
+
+        from ltx_pipelines.utils.media_io import get_videostream_metadata
+
+        retake_call = fake_services.retake_pipeline.generate_calls[-1]
+        _, _, width, height = get_videostream_metadata(retake_call["video_path"])
+        assert (width, height) == (1280, 704)
+
     def test_prefers_api_video_routes_retake_to_api(self, client, test_state, fake_services):
         test_state.config.force_api_generations = False
         test_state.state.app_settings.user_prefers_ltx_api_video_generations = True

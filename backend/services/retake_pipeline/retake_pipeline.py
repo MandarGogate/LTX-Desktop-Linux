@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
+from collections.abc import Callable
+
 if TYPE_CHECKING:
     import torch
     from ltx_core.components.guiders import MultiModalGuiderParams
     from ltx_core.loader import LoraPathStrengthAndSDOps
     from ltx_core.quantization import QuantizationPolicy
+    from services.vram_manager.vram_manager import VRAMManager
 
 
 class RetakePipeline(Protocol):
@@ -20,6 +23,7 @@ class RetakePipeline(Protocol):
         *,
         loras: list["LoraPathStrengthAndSDOps"] | None = None,
         quantization: "QuantizationPolicy | None" = None,
+        vram_manager: "VRAMManager | None" = None,
     ) -> "RetakePipeline": ...
 
     def generate(
@@ -39,4 +43,5 @@ class RetakePipeline(Protocol):
         regenerate_audio: bool = True,
         enhance_prompt: bool = False,
         distilled: bool = True,
+        progress_callback: "Callable[[int, int], None] | None" = None,
     ) -> None: ...

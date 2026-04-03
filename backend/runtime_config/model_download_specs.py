@@ -28,6 +28,7 @@ MODEL_FILE_ORDER: tuple[ModelFileType, ...] = (
     "upsampler",
     "distilled_lora",
     "ic_lora",
+    "ic_lora_motion_track",
     "depth_processor",
     "person_detector",
     "pose_processor",
@@ -65,6 +66,13 @@ DEFAULT_MODEL_DOWNLOAD_SPECS: dict[ModelFileType, ModelFileDownloadSpec] = {
         is_folder=False,
         repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
         description="Union IC-LoRA control model",
+    ),
+    "ic_lora_motion_track": ModelFileDownloadSpec(
+        relative_path=Path("loras/ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors"),
+        expected_size_bytes=654_465_352,
+        is_folder=False,
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
+        description="Motion track IC-LoRA control model",
     ),
     "depth_processor": ModelFileDownloadSpec(
         relative_path=Path("dpt-hybrid-midas"),

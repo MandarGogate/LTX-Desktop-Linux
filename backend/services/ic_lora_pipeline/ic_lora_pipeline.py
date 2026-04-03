@@ -32,5 +32,10 @@ class IcLoraPipeline(Protocol):
         images: list[ImageConditioningInput],
         video_conditioning: list[tuple[str, float]],
         output_path: str,
+        source_audio_path: str | None = None,
+        *,
+        source_audio_start_time: float = 0.0,
+        source_audio_max_duration: float | None = None,
+        skip_stage_2: bool = False,
     ) -> None:
         ...

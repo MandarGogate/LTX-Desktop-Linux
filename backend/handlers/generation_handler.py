@@ -25,11 +25,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 GenerationSlot = Literal["gpu", "api"]
+_GLOBAL_LIVE_PROGRESS_SNAPSHOT: GenerationProgressResponse | None = None
 
 
 class GenerationHandler(StateHandlerBase):
     def __init__(self, state: AppState, lock: RLock, config: RuntimeConfig) -> None:
         super().__init__(state, lock, config)
+        self._live_progress_snapshot: GenerationProgressResponse | None = None
 
     @with_state_lock
     def start_generation(self, generation_id: str) -> None:
@@ -42,6 +44,13 @@ class GenerationHandler(StateHandlerBase):
             id=generation_id,
             progress=GenerationProgress(phase="", progress=0, current_step=0, total_steps=0),
         )
+        self._live_progress_snapshot = GenerationProgressResponse(
+            status="running",
+            phase="",
+            progress=0,
+            currentStep=0,
+            totalSteps=0,
+        )
 
     @with_state_lock
     def start_api_generation(self, generation_id: str) -> None:
@@ -51,6 +60,13 @@ class GenerationHandler(StateHandlerBase):
         self.state.api_generation = GenerationRunning(
             id=generation_id,
             progress=GenerationProgress(phase="", progress=0, current_step=None, total_steps=None),
+        )
+        self._live_progress_snapshot = GenerationProgressResponse(
+            status="running",
+            phase="",
+            progress=0,
+            currentStep=None,
+            totalSteps=None,
         )
 
     @with_state_lock
@@ -108,6 +124,13 @@ class GenerationHandler(StateHandlerBase):
                         running.progress.progress = progress
                         running.progress.current_step = current_step
                         running.progress.total_steps = total_steps
+                        self._live_progress_snapshot = GenerationProgressResponse(
+                            status="running",
+                            phase=phase,
+                            progress=int(progress),
+                            currentStep=current_step,
+                            totalSteps=total_steps,
+                        )
                     case _:
                         return
             case "api":
@@ -117,6 +140,13 @@ class GenerationHandler(StateHandlerBase):
                         running.progress.progress = progress
                         running.progress.current_step = current_step
                         running.progress.total_steps = total_steps
+                        self._live_progress_snapshot = GenerationProgressResponse(
+                            status="running",
+                            phase=phase,
+                            progress=int(progress),
+                            currentStep=current_step,
+                            totalSteps=total_steps,
+                        )
                     case _:
                         return
             case _:
@@ -130,6 +160,13 @@ class GenerationHandler(StateHandlerBase):
                     case GpuSlot(generation=GenerationRunning(id=generation_id)):
                         cancelled = GenerationCancelled(id=generation_id)
                         self.state.gpu_slot.generation = cancelled
+                        self._live_progress_snapshot = GenerationProgressResponse(
+                            status="cancelled",
+                            phase="cancelled",
+                            progress=0,
+                            currentStep=0,
+                            totalSteps=0,
+                        )
                         return CancelResponse(status="cancelling", id=cancelled.id)
                     case _:
                         pass
@@ -138,6 +175,13 @@ class GenerationHandler(StateHandlerBase):
                     case GenerationRunning(id=generation_id):
                         cancelled = GenerationCancelled(id=generation_id)
                         self.state.api_generation = cancelled
+                        self._live_progress_snapshot = GenerationProgressResponse(
+                            status="cancelled",
+                            phase="cancelled",
+                            progress=0,
+                            currentStep=0,
+                            totalSteps=0,
+                        )
                         return CancelResponse(status="cancelling", id=cancelled.id)
                     case _:
                         pass
@@ -165,12 +209,26 @@ class GenerationHandler(StateHandlerBase):
                 match self.state.gpu_slot:
                     case GpuSlot(generation=GenerationRunning(id=generation_id)) as gpu_slot:
                         gpu_slot.generation = GenerationComplete(id=generation_id, result=result)
+                        self._live_progress_snapshot = GenerationProgressResponse(
+                            status="complete",
+                            phase="complete",
+                            progress=100,
+                            currentStep=0,
+                            totalSteps=0,
+                        )
                     case _:
                         return
             case "api":
                 match self.state.api_generation:
                     case GenerationRunning(id=generation_id):
                         self.state.api_generation = GenerationComplete(id=generation_id, result=result)
+                        self._live_progress_snapshot = GenerationProgressResponse(
+                            status="complete",
+                            phase="complete",
+                            progress=100,
+                            currentStep=0,
+                            totalSteps=0,
+                        )
                     case _:
                         return
             case _:
@@ -184,6 +242,13 @@ class GenerationHandler(StateHandlerBase):
                     case GpuSlot(generation=GenerationRunning(id=generation_id)) as gpu_slot:
                         logger.error("Generation %s failed: %s", generation_id, error)
                         gpu_slot.generation = GenerationError(id=generation_id, error=error)
+                        self._live_progress_snapshot = GenerationProgressResponse(
+                            status="error",
+                            phase="error",
+                            progress=0,
+                            currentStep=0,
+                            totalSteps=0,
+                        )
                     case _:
                         logger.error("Generation failed without active running job: %s", error)
                 return
@@ -192,6 +257,13 @@ class GenerationHandler(StateHandlerBase):
                     case GenerationRunning(id=generation_id):
                         logger.error("Generation %s failed: %s", generation_id, error)
                         self.state.api_generation = GenerationError(id=generation_id, error=error)
+                        self._live_progress_snapshot = GenerationProgressResponse(
+                            status="error",
+                            phase="error",
+                            progress=0,
+                            currentStep=0,
+                            totalSteps=0,
+                        )
                     case _:
                         logger.error("Generation failed without active running job: %s", error)
                 return
@@ -205,6 +277,16 @@ class GenerationHandler(StateHandlerBase):
 
     @with_state_lock
     def get_generation_progress(self) -> GenerationProgressResponse:
+        global _GLOBAL_LIVE_PROGRESS_SNAPSHOT
+        if (
+            _GLOBAL_LIVE_PROGRESS_SNAPSHOT is not None
+            and _GLOBAL_LIVE_PROGRESS_SNAPSHOT.status == "running"
+            and self.is_generation_running()
+        ):
+            return _GLOBAL_LIVE_PROGRESS_SNAPSHOT
+        if self._live_progress_snapshot is not None and self._live_progress_snapshot.status == "running":
+            return self._live_progress_snapshot
+
         gen = self._generation_for_polling()
 
         match gen:

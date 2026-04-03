@@ -40,6 +40,9 @@ class VideoProcessor(Protocol):
     def encode_frame_jpeg(self, frame: FrameArray, quality: int = 85) -> bytes:
         ...
 
+    def resize_frame(self, frame: FrameArray, size: tuple[int, int]) -> FrameArray:
+        ...
+
     def create_writer(self, path: str, fourcc: str, fps: float, size: tuple[int, int]) -> VideoWriterLike:
         ...
 

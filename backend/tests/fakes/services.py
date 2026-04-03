@@ -382,8 +382,10 @@ class FakeCapture:
 
 
 class FakeWriter:
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, fps: float, size: tuple[int, int]) -> None:
         self.path = Path(path)
+        self.fps = fps
+        self.size = size
         self.frames: list[Any] = []
         self.released = False
 
@@ -401,6 +403,7 @@ class FakeVideoProcessor:
         self.videos: dict[str, FakeCapture] = {}
         self.writers: list[FakeWriter] = []
         self.open_video_calls: list[str] = []
+        self.resize_calls: list[dict[str, Any]] = []
 
     def register_video(self, path: str, capture: FakeCapture) -> None:
         self.videos[path] = capture
@@ -438,8 +441,12 @@ class FakeVideoProcessor:
     def encode_frame_jpeg(self, frame: Any, quality: int = 85) -> bytes:  # noqa: ARG002
         return f"jpeg:{frame}".encode("utf-8")
 
+    def resize_frame(self, frame: Any, size: tuple[int, int]) -> Any:
+        self.resize_calls.append({"frame": frame, "size": size})
+        return frame
+
     def create_writer(self, path: str, fourcc: str, fps: float, size: tuple[int, int]) -> FakeWriter:  # noqa: ARG002
-        writer = FakeWriter(path)
+        writer = FakeWriter(path, fps=fps, size=size)
         self.writers.append(writer)
         return writer
 
@@ -749,8 +756,9 @@ class FakeRetakePipeline:
         *,
         loras: list[object] | None = None,
         quantization: object | None = None,
+        vram_manager: object | None = None,
     ) -> "FakeRetakePipeline":
-        del checkpoint_path, gemma_root, device, loras, quantization
+        del checkpoint_path, gemma_root, device, loras, quantization, vram_manager
         pipeline = FakeRetakePipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeRetakePipeline singleton is not bound")

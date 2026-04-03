@@ -11,7 +11,7 @@ import { useAppSettings } from '../contexts/AppSettingsContext'
 import { useGeneration } from '../hooks/use-generation'
 import { useRetake } from '../hooks/use-retake'
 import { useIcLora } from '../hooks/use-ic-lora'
-import type { ICLoraConditioningType } from '../components/ICLoraPanel'
+import type { ICLoraConditioningType, ICLoraModelType } from '../components/ICLoraPanel'
 import type { Asset } from '../types/project'
 import { GenerationErrorDialog } from '../components/GenerationErrorDialog'
 import type { GenerationSettings } from '../components/SettingsPanel'
@@ -33,7 +33,7 @@ import {
 import { logger } from '../lib/logger'
 import { persistSelectableFile } from '../lib/web-file-upload'
 import { RetakePanel } from '../components/RetakePanel'
-import { ICLoraPanel, CONDITIONING_TYPES } from '../components/ICLoraPanel'
+import { ICLoraPanel, CONDITIONING_TYPES, IC_LORA_MODEL_TYPES, getConditioningTypesForModel } from '../components/ICLoraPanel'
 
 // Asset card with hover overlays
 function AssetCard({
@@ -344,6 +344,8 @@ function PromptBar({
   canGenerate,
   buttonLabel,
   buttonIcon,
+  icLoraModelType,
+  onIcLoraModelTypeChange,
   icLoraCondType,
   onIcLoraCondTypeChange,
   icLoraStrength,
@@ -368,6 +370,8 @@ function PromptBar({
   settings: GenerationSettings
   onSettingsChange: (settings: GenerationSettings) => void
   shouldVideoGenerateWithLtxApi: boolean
+  icLoraModelType?: ICLoraModelType
+  onIcLoraModelTypeChange?: (type: ICLoraModelType) => void
   icLoraCondType?: ICLoraConditioningType
   onIcLoraCondTypeChange?: (type: ICLoraConditioningType) => void
   cameraMotion: string
@@ -381,6 +385,7 @@ function PromptBar({
   const [isAudioDragOver, setIsAudioDragOver] = useState(false)
   const isRetake = mode === 'retake'
   const isIcLora = mode === 'ic-lora'
+  const icLoraConditioningOptions = getConditioningTypesForModel(icLoraModelType || 'union')
   const LOCAL_MAX_DURATION: Record<string, number> = { '540p': 20, '720p': 20, '1080p': 20 }
   const localMaxDuration = LOCAL_MAX_DURATION[settings.videoResolution] ?? 20
   const videoDurationOptions = shouldVideoGenerateWithLtxApi
@@ -576,10 +581,23 @@ function PromptBar({
         ) : isIcLora ? (
           <>
             <SettingsDropdown
+              title="CONTROL MODEL"
+              value={icLoraModelType || 'union'}
+              onChange={(v) => onIcLoraModelTypeChange?.(v as ICLoraModelType)}
+              options={IC_LORA_MODEL_TYPES.map(model => ({ value: model.value, label: model.label }))}
+              trigger={
+                <>
+                  <span className="text-zinc-300 font-medium">{IC_LORA_MODEL_TYPES.find(model => model.value === icLoraModelType)?.label || 'Union Control'}</span>
+                  <ChevronUp className="h-3 w-3 text-zinc-500" />
+                </>
+              }
+            />
+            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+            <SettingsDropdown
               title="CONDITIONING TYPE"
               value={icLoraCondType || 'canny'}
               onChange={(v) => onIcLoraCondTypeChange?.(v as ICLoraConditioningType)}
-              options={CONDITIONING_TYPES.map(ct => ({ value: ct.value, label: ct.label }))}
+              options={icLoraConditioningOptions.map(ct => ({ value: ct.value, label: ct.label }))}
               trigger={
                 <>
                   <span className="text-zinc-300 font-medium">{CONDITIONING_TYPES.find(ct => ct.value === icLoraCondType)?.label || 'Canny Edges'}</span>
@@ -915,8 +933,12 @@ export function GenSpace() {
     prompt: string
     input: {
       videoPath: string
+      imagePath: string | null
+      modelType: ICLoraModelType
       conditioningType: ICLoraConditioningType
       conditioningStrength: number
+      aspectRatio: '16:9' | '9:16'
+      duration: number | null
     }
   } | null>(null)
   const [settings, setSettings] = useState<GenerationSettings>(() => normalizeVideoSettingsForCurrentBackend(
@@ -956,6 +978,7 @@ export function GenSpace() {
     submitRetake,
     resetRetake,
     isRetaking,
+    retakeProgress,
     retakeStatus,
     retakeError,
     retakeResult,
@@ -983,26 +1006,43 @@ export function GenSpace() {
   const [icLoraInput, setIcLoraInput] = useState({
     videoUrl: null as string | null,
     videoPath: null as string | null,
+    imageUrl: null as string | null,
+    imagePath: null as string | null,
+    modelType: 'union' as ICLoraModelType,
     conditioningType: 'canny' as ICLoraConditioningType,
     conditioningStrength: 1.0,
+    aspectRatio: '16:9' as '16:9' | '9:16',
+    duration: null as number | null,
     ready: false,
   })
   const [icLoraPanelKey, setIcLoraPanelKey] = useState(0)
+  const [icLoraModelType, setIcLoraModelType] = useState<ICLoraModelType>('union')
   const [icLoraCondType, setIcLoraCondType] = useState<ICLoraConditioningType>('canny')
   const [icLoraStrength, setIcLoraStrength] = useState(1.0)
+  const [icLoraDuration, setIcLoraDuration] = useState<number | null>(null)
   const [icLoraInitial, setIcLoraInitial] = useState<{
     videoUrl: string | null
     videoPath: string | null
-  }>({ videoUrl: null, videoPath: null })
+    imageUrl: string | null
+    imagePath: string | null
+  }>({ videoUrl: null, videoPath: null, imageUrl: null, imagePath: null })
 
   const {
     submitIcLora,
     resetIcLora,
     isIcLoraGenerating,
+    icLoraProgress,
     icLoraStatus,
     icLoraError,
     icLoraResult,
   } = useIcLora()
+
+  useEffect(() => {
+    const allowed = getConditioningTypesForModel(icLoraModelType)
+    if (allowed.some(option => option.value === icLoraCondType)) return
+    const fallback = allowed[0]?.value ?? 'canny'
+    setIcLoraCondType(fallback)
+  }, [icLoraModelType, icLoraCondType])
   
   // Handle incoming frame from the Video Editor for editing
   useEffect(() => {
@@ -1054,6 +1094,8 @@ export function GenSpace() {
     setIcLoraInitial({
       videoUrl: genSpaceIcLoraSource.videoUrl,
       videoPath: genSpaceIcLoraSource.videoPath,
+      imageUrl: null,
+      imagePath: null,
     })
     setIcLoraPanelKey((prev) => prev + 1)
     setGenSpaceIcLoraSource(null)
@@ -1096,6 +1138,12 @@ export function GenSpace() {
       setLocalError(icLoraError)
     }
   }, [icLoraError])
+
+  useEffect(() => {
+    if (isRetaking || isIcLoraGenerating || isGenerating || retakeResult || icLoraResult || videoUrl || imageUrl) {
+      setLocalError(null)
+    }
+  }, [isRetaking, isIcLoraGenerating, isGenerating, retakeResult, icLoraResult, videoUrl, imageUrl])
 
   // Keep the selected model for A2V; only clamp geometry needed by the active path.
   useEffect(() => {
@@ -1260,19 +1308,20 @@ export function GenSpace() {
           path: finalPath,
           url: finalUrl,
           prompt: submission.prompt,
-          resolution: '',
+          resolution: settings.videoResolution,
           generationParams: {
             mode: 'ic-lora',
             prompt: submission.prompt,
             model: 'fast',
-            duration: 0,
-            resolution: '',
+            duration: submission.input.duration ?? 0,
+            resolution: settings.videoResolution,
             fps: 24,
-            audio: false,
+            audio: true,
             cameraMotion: 'none',
             icLoraVideoPath: submission.input.videoPath,
             icLoraConditioningType: submission.input.conditioningType,
             icLoraConditioningStrength: submission.input.conditioningStrength,
+            imageAspectRatio: submission.input.aspectRatio,
           },
           takes: [{ url: finalUrl, path: finalPath, createdAt: Date.now() }],
           activeTakeIndex: 0,
@@ -1334,14 +1383,23 @@ export function GenSpace() {
         prompt,
         input: {
           videoPath: icLoraInput.videoPath,
+          imagePath: icLoraInput.imagePath,
+          modelType: icLoraModelType,
           conditioningType: icLoraCondType,
           conditioningStrength: icLoraStrength,
+          aspectRatio: (settings.aspectRatio || '16:9') as '16:9' | '9:16',
+          duration: icLoraDuration,
         },
       }
       await submitIcLora({
         videoPath: icLoraInput.videoPath,
+        imagePath: icLoraInput.imagePath,
+        modelType: icLoraModelType,
         conditioningType: icLoraCondType,
         conditioningStrength: icLoraStrength,
+        resolution: settings.videoResolution as '540p' | '720p' | '1080p',
+        aspectRatio: (settings.aspectRatio || '16:9') as '16:9' | '9:16',
+        duration: icLoraDuration,
         prompt,
       })
       return
@@ -1364,6 +1422,7 @@ export function GenSpace() {
         duration: retakeInput.duration,
         prompt,
         mode: 'replace_audio_and_video',
+        resolution: settings.videoResolution as '540p' | '720p' | '1080p',
       })
       return
     }
@@ -1453,7 +1512,8 @@ export function GenSpace() {
     setMode('ic-lora')
     setPrompt('')
     setActiveIcLoraSource(null)
-    setIcLoraInitial({ videoUrl: videoAsset.url, videoPath: videoAsset.path })
+    setIcLoraInitial({ videoUrl: videoAsset.url, videoPath: videoAsset.path, imageUrl: null, imagePath: null })
+    setIcLoraDuration(null)
     setIcLoraPanelKey((prev) => prev + 1)
   }
 
@@ -1621,10 +1681,10 @@ export function GenSpace() {
                         <Sparkles className="h-6 w-6 text-violet-400" />
                       </div>
                     </div>
-                    <p className="text-sm text-zinc-400">{statusMessage || 'Generating...'}</p>
-                    {progress > 0 && (
+                    <p className="text-sm text-zinc-400">{mode === 'retake' ? (retakeStatus || 'Generating...') : mode === 'ic-lora' ? (icLoraStatus || 'Generating...') : (statusMessage || 'Generating...')}</p>
+                    {(mode === 'retake' ? retakeProgress : mode === 'ic-lora' ? icLoraProgress : progress) > 0 && (
                       <div className="w-32 h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
-                        <div className="h-full bg-violet-500 transition-all" style={{ width: `${progress}%` }} />
+                        <div className="h-full bg-violet-500 transition-all" style={{ width: `${mode === 'retake' ? retakeProgress : mode === 'ic-lora' ? icLoraProgress : progress}%` }} />
                       </div>
                     )}
                   </div>
@@ -1658,6 +1718,8 @@ export function GenSpace() {
             fillHeight
             isProcessing={isRetaking}
             processingStatus={retakeStatus}
+            resolution={settings.videoResolution as '540p' | '720p' | '1080p'}
+            onResolutionChange={(resolution) => setSettings(prev => ({ ...prev, videoResolution: resolution }))}
             onChange={(data) => setRetakeInput(data)}
           />
         </div>
@@ -1668,14 +1730,24 @@ export function GenSpace() {
           <ICLoraPanel
             initialVideoUrl={icLoraInitial.videoUrl}
             initialVideoPath={icLoraInitial.videoPath}
+            initialImageUrl={icLoraInitial.imageUrl}
+            initialImagePath={icLoraInitial.imagePath}
             resetKey={icLoraPanelKey}
             fillHeight
             isProcessing={isIcLoraGenerating}
             processingStatus={icLoraStatus}
+            modelType={icLoraModelType}
+            onModelTypeChange={setIcLoraModelType}
             conditioningType={icLoraCondType}
             onConditioningTypeChange={setIcLoraCondType}
             conditioningStrength={icLoraStrength}
             onConditioningStrengthChange={setIcLoraStrength}
+            resolution={settings.videoResolution as '540p' | '720p' | '1080p'}
+            onResolutionChange={(resolution) => setSettings(prev => ({ ...prev, videoResolution: resolution }))}
+            aspectRatio={(settings.aspectRatio || '16:9') as '16:9' | '9:16'}
+            onAspectRatioChange={(aspectRatio) => setSettings(prev => ({ ...prev, aspectRatio }))}
+            duration={icLoraDuration}
+            onDurationChange={setIcLoraDuration}
             outputVideoUrl={icLoraResult?.videoUrl || null}
             outputVideoPath={icLoraResult?.videoPath || null}
             onChange={setIcLoraInput}
@@ -1698,6 +1770,8 @@ export function GenSpace() {
           canGenerate={canSubmit}
           buttonLabel={promptButtonLabel}
           buttonIcon={promptButtonIcon}
+          icLoraModelType={icLoraModelType}
+          onIcLoraModelTypeChange={setIcLoraModelType}
           inputImage={inputImage}
           onInputImageChange={setInputImage}
           inputAudio={inputAudio}

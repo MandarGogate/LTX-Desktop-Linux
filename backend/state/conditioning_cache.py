@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 class ConditioningCacheKey(NamedTuple):
     video_path: str
     conditioning_type: str
+    width: int
+    height: int
+    max_frames: int
+    target_frames: int
 
 
 class ConditioningCacheEntry(NamedTuple):

@@ -79,6 +79,13 @@ class VideoProcessorImpl:
             raise RuntimeError("Failed to encode frame")
         return bytes(buf)
 
+    def resize_frame(self, frame: FrameArray, size: tuple[int, int]) -> FrameArray:
+        import cv2
+
+        width, height = size
+        resized = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+        return cast(FrameArray, resized)
+
     def create_writer(self, path: str, fourcc: str, fps: float, size: tuple[int, int]) -> VideoWriterLike:
         import cv2
 

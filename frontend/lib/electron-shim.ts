@@ -127,8 +127,11 @@ const webElectronAPI = {
   },
 
   // ---- Logs ----
-  getLogs: async () => ({ logs: [] }),
-  getLogPath: async () => ({ logPath: '', logDir: '' }),
+  getLogs: async () => {
+    const resp = await webFetch('/web/logs')
+    return resp.json()
+  },
+  getLogPath: async () => ({ logPath: 'server://in-memory', logDir: '' }),
   openLogFolder: async () => false,
 
   // ---- Resources ----

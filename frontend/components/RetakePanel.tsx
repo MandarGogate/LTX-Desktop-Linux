@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { Film, Play, Pause, Volume2, VolumeX, Loader2, Upload, Trash2, RefreshCw } from 'lucide-react'
 import { logger } from '../lib/logger'
 import { fileUrlToPath } from '../lib/url-to-path'
+import { persistDroppedFile, selectLocalFile } from '../lib/select-local-file'
 
 interface RetakePanelProps {
   initialVideoUrl?: string | null
@@ -11,6 +12,8 @@ interface RetakePanelProps {
   isProcessing?: boolean
   processingStatus?: string
   fillHeight?: boolean
+  resolution?: '540p' | '720p' | '1080p'
+  onResolutionChange?: (resolution: '540p' | '720p' | '1080p') => void
   onChange?: (data: {
     videoUrl: string | null
     videoPath: string | null
@@ -29,11 +32,6 @@ function formatTimecode(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`
 }
 
-function pathToFileUrl(filePath: string): string {
-  const normalized = filePath.replace(/\\/g, '/')
-  return normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
-}
-
 export function RetakePanel({
   initialVideoUrl,
   initialVideoPath,
@@ -42,6 +40,8 @@ export function RetakePanel({
   isProcessing = false,
   processingStatus = '',
   fillHeight = false,
+  resolution = '540p',
+  onResolutionChange,
   onChange,
 }: RetakePanelProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -319,17 +319,17 @@ export function RetakePanel({
   }, [draggingHandle, videoDuration])
 
   const handleBrowse = useCallback(async () => {
-    const paths = await window.electronAPI.showOpenFileDialog({
+    const selected = await selectLocalFile({
       title: 'Select Video',
-      filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'avi', 'webm', 'mkv'] }],
+      extensions: ['mp4', 'mov', 'avi', 'webm', 'mkv'],
+      accept: 'video/*,.mp4,.mov,.avi,.webm,.mkv',
+      kind: 'video',
     })
-    if (paths && paths.length > 0) {
-      const filePath = paths[0]
-      setVideoPath(filePath)
-      setVideoUrl(pathToFileUrl(filePath))
-      setThumbnails([])
-      extractingRef.current = false
-    }
+    if (!selected) return
+    setVideoPath(selected.path)
+    setVideoUrl(selected.url)
+    setThumbnails([])
+    extractingRef.current = false
   }, [])
 
   const handleClear = useCallback(() => {
@@ -345,7 +345,7 @@ export function RetakePanel({
     initialSelectionAppliedRef.current = false
   }, [])
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragOver(false)
 
@@ -368,13 +368,11 @@ export function RetakePanel({
 
     const file = e.dataTransfer.files?.[0]
     if (file) {
-      const filePath = (file as any).path as string | undefined
-      if (filePath) {
-        setVideoPath(filePath)
-        setVideoUrl(pathToFileUrl(filePath))
-        setThumbnails([])
-        extractingRef.current = false
-      }
+      const persisted = await persistDroppedFile(file, 'video')
+      setVideoPath(persisted.path)
+      setVideoUrl(persisted.url)
+      setThumbnails([])
+      extractingRef.current = false
     }
   }, [])
 
@@ -422,7 +420,7 @@ export function RetakePanel({
           }`}
           onDragOver={(e) => { e.preventDefault(); setIsDragOver(true) }}
           onDragLeave={() => setIsDragOver(false)}
-          onDrop={handleDrop}
+          onDrop={(e) => { void handleDrop(e) }}
         >
           <div className="p-3 rounded-full bg-zinc-800">
             <Upload className="h-5 w-5 text-zinc-400" />
@@ -471,11 +469,26 @@ export function RetakePanel({
               </span>
             </div>
 
-            <div className="px-4 pt-3 pb-1">
-              <p className="text-xs font-semibold text-white">Select the video part to regenerate</p>
-              <p className="text-[10px] text-zinc-500 mt-0.5">
-                Use the prompt panel below to describe what should happen
-              </p>
+            <div className="px-4 pt-3 pb-1 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-white">Select the video part to regenerate</p>
+                <p className="text-[10px] text-zinc-500 mt-0.5">
+                  Use the prompt panel below to describe what should happen
+                </p>
+              </div>
+              <label className="flex items-center gap-2 text-[10px] text-zinc-500">
+                <span>Output</span>
+                <select
+                  value={resolution}
+                  onChange={(e) => onResolutionChange?.(e.target.value as '540p' | '720p' | '1080p')}
+                  className="bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-blue-500"
+                  disabled={isProcessing}
+                >
+                  <option value="540p">540p</option>
+                  <option value="720p">720p</option>
+                  <option value="1080p">1080p</option>
+                </select>
+              </label>
             </div>
 
             <div className="px-4 pb-4">

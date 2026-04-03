@@ -925,7 +925,9 @@ class PipelinesHandler(StateHandlerBase):
     def load_ic_lora(
         self,
         lora_path: str,
-        depth_model_path: str,
+        depth_model_path: str | None = None,
+        pose_model_path: str | None = None,
+        person_detector_model_path: str | None = None,
     ) -> ICLoraState:
         self._install_text_patches_if_needed()
 
@@ -935,10 +937,14 @@ class PipelinesHandler(StateHandlerBase):
                     active_pipeline=ICLoraState(
                         lora_path=current_lora_path,
                         depth_model_path=current_depth_model_path,
+                        pose_model_path=current_pose_model_path,
+                        person_detector_model_path=current_person_detector_model_path,
                     ) as state
                 ) if (
                     current_lora_path == lora_path
                     and current_depth_model_path == depth_model_path
+                    and current_pose_model_path == pose_model_path
+                    and current_person_detector_model_path == person_detector_model_path
                 ):
                     return state
                 case _:
@@ -953,12 +959,24 @@ class PipelinesHandler(StateHandlerBase):
             lora_path,
             self.config.device,
         )
-        depth_pipeline = self._depth_processor_pipeline_class.create(depth_model_path, self.config.device)
+        depth_pipeline = None
+        if depth_model_path is not None:
+            depth_pipeline = self._depth_processor_pipeline_class.create(depth_model_path, self.config.device)
+        pose_pipeline = None
+        if pose_model_path is not None and person_detector_model_path is not None:
+            pose_pipeline = self._pose_processor_pipeline_class.create(
+                pose_model_path,
+                person_detector_model_path,
+                self.config.device,
+            )
         state = ICLoraState(
             pipeline=pipeline,
             lora_path=lora_path,
             depth_pipeline=depth_pipeline,
             depth_model_path=depth_model_path,
+            pose_pipeline=pose_pipeline,
+            pose_model_path=pose_model_path,
+            person_detector_model_path=person_detector_model_path,
         )
 
         with self._lock:
@@ -1123,6 +1141,16 @@ class PipelinesHandler(StateHandlerBase):
     def load_retake_pipeline(self, *, distilled: bool = True) -> RetakePipelineState:
         self._install_text_patches_if_needed()
 
+        vram_gb = 0
+        if self._gpu_info is not None:
+            vram_gb = self._gpu_info.get_vram_total_gb() or 0
+        vram_manager = VRAMManager(
+            self.config.device,
+            vram_gb,
+            user_blocks_on_gpu=self.state.app_settings.num_blocks_to_swap,
+            user_run_mode=self.state.app_settings.run_mode,
+        )
+
         quantized = device_supports_fp8(self.config.device)
 
         with self._lock:
@@ -1145,6 +1173,7 @@ class PipelinesHandler(StateHandlerBase):
             device=self.config.device,
             loras=[],
             quantization=quantization,
+            vram_manager=vram_manager,
         )
         state = RetakePipelineState(pipeline=pipeline, distilled=distilled, quantized=quantized)
 

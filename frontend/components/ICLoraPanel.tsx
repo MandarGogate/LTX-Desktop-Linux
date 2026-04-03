@@ -6,8 +6,11 @@ import {
 import { backendFetch } from '../lib/backend'
 import { logger } from '../lib/logger'
 import { fileUrlToPath } from '../lib/url-to-path'
+import { persistDroppedFile, selectLocalFile } from '../lib/select-local-file'
+import { Select } from './ui/select'
 
-export type ICLoraConditioningType = 'canny' | 'depth'
+export type ICLoraModelType = 'union' | 'motion_track'
+export type ICLoraConditioningType = 'canny' | 'depth' | 'pose' | 'motion_track'
 
 type DownloadStatus = 'idle' | 'downloading' | 'complete' | 'error'
 
@@ -40,70 +43,116 @@ interface ModelsStatusResponse {
 interface ICLoraPanelProps {
   initialVideoUrl?: string | null
   initialVideoPath?: string | null
+  initialImageUrl?: string | null
+  initialImagePath?: string | null
   resetKey?: number
   fillHeight?: boolean
   isProcessing?: boolean
   processingStatus?: string
+  modelType?: ICLoraModelType
+  onModelTypeChange?: (type: ICLoraModelType) => void
   conditioningType?: ICLoraConditioningType
   onConditioningTypeChange?: (type: ICLoraConditioningType) => void
   conditioningStrength?: number
   onConditioningStrengthChange?: (strength: number) => void
+  resolution?: '540p' | '720p' | '1080p'
+  onResolutionChange?: (resolution: '540p' | '720p' | '1080p') => void
+  aspectRatio?: '16:9' | '9:16'
+  onAspectRatioChange?: (aspectRatio: '16:9' | '9:16') => void
+  duration?: number | null
+  onDurationChange?: (duration: number | null) => void
   outputVideoUrl?: string | null
   outputVideoPath?: string | null
+  showInlineOutputPreview?: boolean
   onChange?: (data: {
     videoUrl: string | null
     videoPath: string | null
+    imageUrl: string | null
+    imagePath: string | null
+    modelType: ICLoraModelType
     conditioningType: ICLoraConditioningType
     conditioningStrength: number
+    resolution: '540p' | '720p' | '1080p'
+    aspectRatio: '16:9' | '9:16'
+    duration: number | null
     ready: boolean
   }) => void
 }
 
+export const IC_LORA_MODEL_TYPES: { value: ICLoraModelType; label: string; desc: string }[] = [
+  { value: 'union', label: 'Union Control', desc: 'Canny, depth, or pose guidance' },
+  { value: 'motion_track', label: 'Motion Track', desc: 'Video with colored spline / trajectory overlays' },
+]
+
 export const CONDITIONING_TYPES: { value: ICLoraConditioningType; label: string; desc: string }[] = [
   { value: 'canny', label: 'Canny Edges', desc: 'Edge detection' },
   { value: 'depth', label: 'Depth Map', desc: 'Estimated depth' },
+  { value: 'pose', label: 'Pose', desc: 'OpenPose-style skeleton guidance' },
+  { value: 'motion_track', label: 'Motion Track', desc: 'Trajectory overlay control video' },
 ]
 
-const IC_LORA_MODEL_IDS = ['ic_lora', 'depth_processor'] as const
+export function getConditioningTypesForModel(modelType: ICLoraModelType) {
+  return modelType === 'motion_track'
+    ? CONDITIONING_TYPES.filter(ct => ct.value === 'motion_track')
+    : CONDITIONING_TYPES.filter(ct => ct.value !== 'motion_track')
+}
+
+const IC_LORA_MODEL_IDS = ['ic_lora', 'ic_lora_motion_track', 'depth_processor', 'person_detector', 'pose_processor'] as const
 type IcLoraModelId = typeof IC_LORA_MODEL_IDS[number]
 
 const IC_LORA_MODEL_LABELS: Record<IcLoraModelId, string> = {
-  ic_lora: 'IC-LoRA Union',
+  ic_lora: 'IC-LoRA Union Control',
+  ic_lora_motion_track: 'IC-LoRA Motion Track',
   depth_processor: 'Depth Processor',
+  person_detector: 'Person Detector',
+  pose_processor: 'Pose Processor',
 }
 
 const EMPTY_IC_MODEL_STATUS: Record<IcLoraModelId, boolean> = {
   ic_lora: false,
+  ic_lora_motion_track: false,
   depth_processor: false,
-}
-
-function pathToFileUrl(filePath: string): string {
-  const normalized = filePath.replace(/\\/g, '/')
-  return normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
+  person_detector: false,
+  pose_processor: false,
 }
 
 export function ICLoraPanel({
   initialVideoUrl,
   initialVideoPath,
+  initialImageUrl,
+  initialImagePath,
   resetKey,
   fillHeight = false,
   isProcessing = false,
   processingStatus = '',
+  modelType: modelTypeProp,
+  onModelTypeChange,
   conditioningType: conditioningTypeProp,
   onConditioningTypeChange,
   conditioningStrength: conditioningStrengthProp,
   onConditioningStrengthChange,
+  resolution = '540p',
+  onResolutionChange,
+  aspectRatio = '16:9',
+  onAspectRatioChange,
+  duration = null,
+  onDurationChange,
   outputVideoUrl,
   outputVideoPath: _outputVideoPath,
+  showInlineOutputPreview = true,
   onChange,
 }: ICLoraPanelProps) {
   const inputVideoRef = useRef<HTMLVideoElement>(null)
   const [inputVideoUrl, setInputVideoUrl] = useState<string | null>(initialVideoUrl || null)
   const [inputVideoPath, setInputVideoPath] = useState<string | null>(initialVideoPath || null)
+  const [inputImageUrl, setInputImageUrl] = useState<string | null>(initialImageUrl || null)
+  const [inputImagePath, setInputImagePath] = useState<string | null>(initialImagePath || null)
   const [inputTime, setInputTime] = useState(0)
 
+  const [internalModelType, setInternalModelType] = useState<ICLoraModelType>('union')
   const [internalCondType, setInternalCondType] = useState<ICLoraConditioningType>('canny')
   const [internalCondStrength, setInternalCondStrength] = useState(1.0)
+  const modelType = modelTypeProp ?? internalModelType
   const conditioningType = conditioningTypeProp ?? internalCondType
   const conditioningStrength = conditioningStrengthProp ?? internalCondStrength
   const [conditioningPreview, setConditioningPreview] = useState<string | null>(null)
@@ -117,31 +166,59 @@ export function ICLoraPanel({
   const [downloadSessionId, setDownloadSessionId] = useState<string | null>(null)
   const [extractError, setExtractError] = useState<string | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
-  const icLoraReady = IC_LORA_MODEL_IDS.every(id => icModelDownloaded[id])
+  const requiredModelIds: IcLoraModelId[] = modelType === 'motion_track'
+    ? ['ic_lora_motion_track']
+    : conditioningType === 'depth'
+      ? ['ic_lora', 'depth_processor']
+      : conditioningType === 'pose'
+        ? ['ic_lora', 'person_detector', 'pose_processor']
+        : ['ic_lora']
+  const requiredModelIdsKey = requiredModelIds.join('|')
+  const icLoraReady = requiredModelIds.every(id => icModelDownloaded[id])
 
   useEffect(() => {
     if (resetKey === undefined) return
     setInputVideoUrl(initialVideoUrl || null)
     setInputVideoPath(initialVideoPath || null)
+    setInputImageUrl(initialImageUrl || null)
+    setInputImagePath(initialImagePath || null)
     setInputTime(0)
+    setInternalModelType('union')
     setInternalCondType('canny')
     setInternalCondStrength(1.0)
+    onModelTypeChange?.('union')
     onConditioningTypeChange?.('canny')
     onConditioningStrengthChange?.(1.0)
     setConditioningPreview(null)
     setExtractError(null)
-  }, [resetKey, initialVideoUrl, initialVideoPath]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [resetKey, initialVideoUrl, initialVideoPath, initialImageUrl, initialImagePath]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const allowed = getConditioningTypesForModel(modelType)
+    if (allowed.some(option => option.value === conditioningType)) return
+    const fallback = allowed[0]?.value ?? 'canny'
+    if (conditioningTypeProp === undefined) {
+      setInternalCondType(fallback)
+    }
+    onConditioningTypeChange?.(fallback)
+  }, [modelType, conditioningType, conditioningTypeProp, onConditioningTypeChange])
 
   useEffect(() => {
     const ready = !!inputVideoPath && icLoraReady
     onChange?.({
       videoUrl: inputVideoUrl,
       videoPath: inputVideoPath,
+      imageUrl: inputImageUrl,
+      imagePath: inputImagePath,
+      modelType,
       conditioningType,
       conditioningStrength,
+      resolution,
+      aspectRatio,
+      duration,
       ready,
     })
-  }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, icLoraReady, onChange])
+  }, [inputVideoUrl, inputVideoPath, inputImageUrl, inputImagePath, modelType, conditioningType, conditioningStrength, resolution, aspectRatio, duration, icLoraReady, onChange])
 
   const checkIcLoraAvailability = useCallback(async () => {
     setIsCheckingIcLora(true)
@@ -158,7 +235,7 @@ export function ICLoraPanel({
         nextStatus[modelId] = statusPayload.models.some(model => model.id === modelId && model.downloaded)
       })
       setIcModelDownloaded(nextStatus)
-      const isReady = IC_LORA_MODEL_IDS.every(modelId => nextStatus[modelId])
+      const isReady = requiredModelIds.every(modelId => nextStatus[modelId])
 
       if (isReady) {
         setIsDownloadingIcLora(false)
@@ -172,7 +249,7 @@ export function ICLoraPanel({
     } finally {
       setIsCheckingIcLora(false)
     }
-  }, [])
+  }, [requiredModelIdsKey])
 
   useEffect(() => {
     void checkIcLoraAvailability()
@@ -209,7 +286,7 @@ export function ICLoraPanel({
     void pollProgress()
     const interval = setInterval(() => { void pollProgress() }, 1000)
     return () => clearInterval(interval)
-  }, [icLoraReady, isDownloadingIcLora, downloadSessionId, checkIcLoraAvailability])
+  }, [icLoraReady, isDownloadingIcLora, downloadSessionId, checkIcLoraAvailability, requiredModelIdsKey])
 
   const handleDownloadIcLora = useCallback(async () => {
     if (isDownloadingIcLora) return
@@ -219,7 +296,7 @@ export function ICLoraPanel({
       const response = await backendFetch('/api/models/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelTypes: [...IC_LORA_MODEL_IDS] }),
+        body: JSON.stringify({ modelTypes: requiredModelIds }),
       })
 
       const payload = await response.json().catch(() => ({})) as ModelDownloadStartResponse
@@ -242,7 +319,7 @@ export function ICLoraPanel({
       logger.warn(`Failed to start IC-LoRA download: ${e}`)
       setDownloadError((e as Error).message)
     }
-  }, [isDownloadingIcLora])
+  }, [isDownloadingIcLora, requiredModelIdsKey])
 
   const isExtractingRef = useRef(false)
   const extractConditioning = useCallback(async () => {
@@ -256,6 +333,7 @@ export function ICLoraPanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           video_path: inputVideoPath,
+          model_type: modelType,
           conditioning_type: conditioningType,
           frame_time: inputTime,
         }),
@@ -274,7 +352,7 @@ export function ICLoraPanel({
       isExtractingRef.current = false
       setIsExtracting(false)
     }
-  }, [inputVideoPath, conditioningType, inputTime, icLoraReady])
+  }, [inputVideoPath, modelType, conditioningType, inputTime, icLoraReady])
 
   const extractTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
@@ -302,28 +380,34 @@ export function ICLoraPanel({
   }, [inputVideoUrl, icLoraReady, isCheckingIcLora])
 
   const handleBrowse = useCallback(async () => {
-    const paths = await window.electronAPI.showOpenFileDialog({
-      title: 'Select Driving Video',
-      filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'avi', 'webm', 'mkv'] }],
-    })
-    if (paths && paths.length > 0) {
-      const filePath = paths[0]
-      setInputVideoPath(filePath)
-      setInputVideoUrl(pathToFileUrl(filePath))
+    try {
+      const selected = await selectLocalFile({
+        title: 'Select Driving Video',
+        extensions: ['mp4', 'mov', 'avi', 'webm', 'mkv'],
+        accept: 'video/*,.mp4,.mov,.avi,.webm,.mkv',
+        kind: 'video',
+      })
+      if (!selected) return
+      setInputVideoPath(selected.path)
+      setInputVideoUrl(selected.url)
       setConditioningPreview(null)
       setExtractError(null)
+    } catch (error) {
+      setExtractError(error instanceof Error ? error.message : 'Failed to load video')
     }
   }, [])
 
   const handleClear = useCallback(() => {
     setInputVideoPath(null)
     setInputVideoUrl(null)
+    setInputImagePath(null)
+    setInputImageUrl(null)
     setInputTime(0)
     setConditioningPreview(null)
     setExtractError(null)
   }, [])
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragOver(false)
 
@@ -346,18 +430,41 @@ export function ICLoraPanel({
 
     const file = e.dataTransfer.files?.[0]
     if (file) {
-      const filePath = (file as unknown as { path?: string }).path
-      if (filePath) {
-        setInputVideoPath(filePath)
-        setInputVideoUrl(pathToFileUrl(filePath))
+      try {
+        const persisted = await persistDroppedFile(file, 'video')
+        setInputVideoPath(persisted.path)
+        setInputVideoUrl(persisted.url)
         setConditioningPreview(null)
         setExtractError(null)
+      } catch (error) {
+        setExtractError(error instanceof Error ? error.message : 'Failed to load dropped video')
       }
     }
   }, [])
 
+  const handleBrowseImage = useCallback(async () => {
+    try {
+      const selected = await selectLocalFile({
+        title: 'Select Starting Frame',
+        extensions: ['png', 'jpg', 'jpeg', 'webp'],
+        accept: 'image/*,.png,.jpg,.jpeg,.webp',
+        kind: 'image',
+      })
+      if (!selected) return
+      setInputImagePath(selected.path)
+      setInputImageUrl(selected.url)
+    } catch (error) {
+      setExtractError(error instanceof Error ? error.message : 'Failed to load image')
+    }
+  }, [])
+
+  const handleClearImage = useCallback(() => {
+    setInputImagePath(null)
+    setInputImageUrl(null)
+  }, [])
+
   const showDownloadGate = isCheckingIcLora || !icLoraReady
-  const gateItems = IC_LORA_MODEL_IDS.map(modelId => {
+  const gateItems = requiredModelIds.map(modelId => {
     const downloaded = icModelDownloaded[modelId]
     const isCompleted = downloadProgress?.completed_files?.includes(modelId) ?? false
     const isCurrentDownload = isDownloadingIcLora && downloadProgress?.current_downloading_file === modelId
@@ -373,24 +480,26 @@ export function ICLoraPanel({
           <Sparkles className="h-4 w-4 text-amber-400" />
           <span className="text-sm font-semibold text-white">IC-LoRA / Style Transfer</span>
         </div>
-        {inputVideoUrl && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleClear}
-              className="p-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
-              title="Clear video"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={handleBrowse}
-              className="p-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
-              title="Replace video"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {inputVideoUrl && (
+            <>
+              <button
+                onClick={handleClear}
+                className="p-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
+                title="Clear video"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={handleBrowse}
+                className="p-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
+                title="Replace video"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {showDownloadGate ? (
@@ -403,7 +512,7 @@ export function ICLoraPanel({
               <div className="flex-1 min-w-0">
                 <h3 className="text-sm font-semibold text-white">Download Required: IC-LoRA Resources</h3>
                 <p className="text-xs text-zinc-400 mt-1">
-                  Editing is locked until all IC-LoRA preprocessing models are available locally.
+                  The selected IC-LoRA mode is locked until its required local models are available.
                 </p>
               </div>
             </div>
@@ -472,9 +581,9 @@ export function ICLoraPanel({
         </div>
       ) : (
         <div className="flex-1 flex min-h-0 overflow-hidden">
-          <div className="flex-1 flex flex-col border-r border-zinc-800 min-w-0">
+          <div className={`${showInlineOutputPreview ? 'flex-1 border-r border-zinc-800' : 'w-1/2 border-r border-zinc-800'} flex flex-col min-w-0`}>
             <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between gap-2">
-              <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider shrink-0">Input</span>
+              <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider shrink-0">Control Video</span>
               {inputVideoPath && (
                 <span className="text-[10px] text-zinc-500 truncate min-w-0">
                   {inputVideoPath.split(/[\\/]/).pop()}
@@ -492,7 +601,7 @@ export function ICLoraPanel({
               className={`flex-1 min-h-0 bg-black flex items-center justify-center relative ${!inputVideoUrl ? 'border-2 border-dashed border-zinc-700 m-3 rounded-lg' : ''} ${isDragOver ? 'border-blue-500 bg-blue-500/10' : ''}`}
               onDragOver={(e) => { e.preventDefault(); setIsDragOver(true) }}
               onDragLeave={() => setIsDragOver(false)}
-              onDrop={handleDrop}
+              onDrop={(e) => { void handleDrop(e) }}
             >
               {inputVideoUrl ? (
                 <video
@@ -506,7 +615,12 @@ export function ICLoraPanel({
                   <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center mx-auto mb-2">
                     <Film className="h-6 w-6 text-zinc-600" />
                   </div>
-                  <p className="text-zinc-400 text-xs">Drop or import a driving video</p>
+                  <p className="text-zinc-400 text-xs">Drop or import a control video</p>
+                  {modelType === 'motion_track' && (
+                    <p className="text-[10px] text-zinc-500 mt-2 max-w-[220px] mx-auto">
+                      Motion Track expects a trajectory-overlay video, not a plain reference clip.
+                    </p>
+                  )}
                   <button
                     onClick={handleBrowse}
                     className="mt-2 px-3 py-1.5 text-[10px] text-blue-400 border border-blue-500/30 rounded-lg hover:bg-blue-600/10 transition-colors"
@@ -516,9 +630,41 @@ export function ICLoraPanel({
                 </div>
               )}
             </div>
+            <div className="border-t border-zinc-800 p-3 bg-zinc-950/60">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Starting Frame</span>
+                <div className="flex items-center gap-1">
+                  {inputImageUrl && (
+                    <button
+                      onClick={handleClearImage}
+                      className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors"
+                      title="Clear starting frame"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  )}
+                  <button
+                    onClick={handleBrowseImage}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors shrink-0"
+                  >
+                    <Upload className="h-3 w-3" />
+                    {inputImageUrl ? 'Replace' : 'Import'}
+                  </button>
+                </div>
+              </div>
+              <div className="h-24 rounded-lg border border-zinc-800 bg-black flex items-center justify-center overflow-hidden">
+                {inputImageUrl ? (
+                  <img src={inputImageUrl} alt="Starting frame" className="w-full h-full object-contain" />
+                ) : (
+                  <p className="text-zinc-600 text-xs text-center px-3">
+                    Optional image reference for the first frame / image-to-video guidance
+                  </p>
+                )}
+              </div>
+            </div>
           </div>
 
-          <div className="flex-1 flex flex-col min-w-0">
+          <div className={`${showInlineOutputPreview ? 'flex-1' : 'w-1/2'} flex flex-col min-w-0`}>
             <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between gap-2">
               <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Conditioning</span>
               <button
@@ -547,30 +693,71 @@ export function ICLoraPanel({
             </div>
           </div>
 
-          {/* Output column */}
-          <div className="flex-1 flex flex-col border-l border-zinc-800 min-w-0">
-            <div className="px-3 py-2 border-b border-zinc-800 flex items-center">
-              <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Output</span>
+          {showInlineOutputPreview && (
+            <div className="flex-1 flex flex-col border-l border-zinc-800 min-w-0">
+              <div className="px-3 py-2 border-b border-zinc-800 flex items-center">
+                <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Output</span>
+              </div>
+              <div className="flex-1 bg-black flex items-center justify-center min-h-0 relative">
+                {outputVideoUrl ? (
+                  <video
+                    src={outputVideoUrl}
+                    className="w-full h-full object-contain"
+                    controls
+                  />
+                ) : isProcessing ? (
+                  <div className="text-center p-4">
+                    <Loader2 className="h-6 w-6 text-blue-400 animate-spin mx-auto mb-2" />
+                    <p className="text-zinc-400 text-xs">{processingStatus || 'Generating...'}</p>
+                  </div>
+                ) : (
+                  <div className="text-center p-4">
+                    <p className="text-zinc-600 text-xs">Output video will appear here</p>
+                  </div>
+                )}
+              </div>
             </div>
-            <div className="flex-1 bg-black flex items-center justify-center min-h-0 relative">
-              {outputVideoUrl ? (
-                <video
-                  src={outputVideoUrl}
-                  className="w-full h-full object-contain"
-                  controls
-                />
-              ) : isProcessing ? (
-                <div className="text-center p-4">
-                  <Loader2 className="h-6 w-6 text-blue-400 animate-spin mx-auto mb-2" />
-                  <p className="text-zinc-400 text-xs">{processingStatus || 'Generating...'}</p>
-                </div>
-              ) : (
-                <div className="text-center p-4">
-                  <p className="text-zinc-600 text-xs">Output video will appear here</p>
-                </div>
-              )}
-            </div>
-          </div>
+          )}
+        </div>
+      )}
+
+      {!showDownloadGate && (
+        <div className="grid grid-cols-3 gap-3 px-4 py-3 border-t border-zinc-800 flex-shrink-0">
+          <Select
+            label="Duration"
+            value={duration == null ? 'full' : String(duration)}
+            onChange={(e) => onDurationChange?.(e.target.value === 'full' ? null : Number(e.target.value))}
+          >
+            <option value="full">Full Ref</option>
+            <option value="1">1 sec</option>
+            <option value="2">2 sec</option>
+            <option value="3">3 sec</option>
+            <option value="4">4 sec</option>
+            <option value="5">5 sec</option>
+            <option value="6">6 sec</option>
+            <option value="8">8 sec</option>
+            <option value="10">10 sec</option>
+            <option value="12">12 sec</option>
+            <option value="15">15 sec</option>
+            <option value="20">20 sec</option>
+          </Select>
+          <Select
+            label="Resolution"
+            value={resolution}
+            onChange={(e) => onResolutionChange?.(e.target.value as '540p' | '720p' | '1080p')}
+          >
+            <option value="540p">540p</option>
+            <option value="720p">720p</option>
+            <option value="1080p">1080p</option>
+          </Select>
+          <Select
+            label="Aspect Ratio"
+            value={aspectRatio}
+            onChange={(e) => onAspectRatioChange?.(e.target.value as '16:9' | '9:16')}
+          >
+            <option value="16:9">16:9 Landscape</option>
+            <option value="9:16">9:16 Portrait</option>
+          </Select>
         </div>
       )}
 

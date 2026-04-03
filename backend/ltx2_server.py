@@ -25,6 +25,8 @@ from pathlib import Path
 import threading
 import ast
 
+from web_log_buffer import install_web_log_capture
+
 # Note: expandable_segments is not supported on all platforms
 
 import torch
@@ -35,6 +37,8 @@ from state.app_settings import AppSettings
 # ============================================================
 
 import platform
+
+install_web_log_capture()
 
 # Backend logs to console only — Electron captures stdout/stderr and writes
 # them to the session log file. This ensures *all* output (including early
@@ -240,6 +244,8 @@ def _migrate_models_layout(models_dir: Path) -> None:
         # IC-LoRA from root → loras/
         (models_dir / "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
          models_dir / "loras" / "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"),
+        (models_dir / "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors",
+         models_dir / "loras" / "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors"),
         # Default text encoder folder from root → text_encoders/
         (models_dir / "gemma-3-12b-it-qat-q4_0-unquantized",
          models_dir / "text_encoders" / "gemma-3-12b-it-qat-q4_0-unquantized"),

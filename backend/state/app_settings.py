@@ -229,5 +229,6 @@ def to_settings_response(settings: AppSettings) -> SettingsResponse:
 
 
 def should_video_generate_with_ltx_api(*, force_api_generations: bool, settings: AppSettings) -> bool:
-    del force_api_generations, settings
-    return False
+    if force_api_generations:
+        return True
+    return settings.user_prefers_ltx_api_video_generations and bool(settings.ltx_api_key)

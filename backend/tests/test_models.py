@@ -56,6 +56,12 @@ class TestModelsStatus:
         ic_lora = next(m for m in r.json()["models"] if m["id"] == "ic_lora")
         assert ic_lora["required"] is False
 
+    def test_motion_track_ic_lora_is_optional_and_reported(self, client):
+        r = client.get("/api/models/status")
+        assert r.status_code == 200
+        ic_lora = next(m for m in r.json()["models"] if m["id"] == "ic_lora_motion_track")
+        assert ic_lora["required"] is False
+
     def test_depth_person_detector_and_pose_are_optional_and_reported(self, client):
         r = client.get("/api/models/status")
         assert r.status_code == 200
@@ -273,6 +279,15 @@ class TestModelDownload:
                 assert spec.repo_id in downloaded_repos
             else:
                 assert spec.name in downloaded_filenames
+
+    def test_download_motion_track_ic_lora(self, client, test_state):
+        bundle = ["ic_lora_motion_track"]
+        r = client.post("/api/models/download", json={"modelTypes": bundle})
+        assert r.status_code == 200
+
+        file_calls = [c for c in test_state.model_downloader.calls if c["kind"] == "file"]
+        downloaded_filenames = {c["filename"] for c in file_calls}
+        assert test_state.config.spec_for("ic_lora_motion_track").name in downloaded_filenames
 
     def test_empty_model_types_is_valid_noop(self, client, test_state):
         r = client.post("/api/models/download", json={"modelTypes": []})

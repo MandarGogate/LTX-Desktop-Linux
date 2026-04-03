@@ -103,6 +103,12 @@ class VRAMProfileResponse(BaseModel):
     fp8_enabled: bool
 
 
+class WebLogsResponse(BaseModel):
+    logPath: str
+    lines: list[str]
+    error: str | None = None
+
+
 # ============================================================
 # Allowed paths validation
 # ============================================================
@@ -177,6 +183,18 @@ def get_vram_profile(handler: Any = Depends(get_state_service)) -> dict[str, Any
     vram_gb = handler.gpu_info.get_vram_total_gb() or 0
     manager = VRAMManager(handler.config.device, vram_gb)
     return manager.to_profile_dict()  # type: ignore[return-value]
+
+
+@router.get("/logs", response_model=WebLogsResponse)
+def get_logs(limit: int = 200) -> WebLogsResponse:
+    """Return recent backend/server logs for the web-mode log viewer."""
+    from web_log_buffer import get_recent_lines
+
+    safe_limit = max(1, min(limit, 2000))
+    return WebLogsResponse(
+        logPath="server://in-memory",
+        lines=get_recent_lines(safe_limit),
+    )
 
 
 @router.post("/file/read", response_model=FileReadResponse)

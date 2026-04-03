@@ -13,6 +13,7 @@ ModelFileType = Literal[
     "upsampler",
     "distilled_lora",
     "ic_lora",
+    "ic_lora_motion_track",
     "depth_processor",
     "person_detector",
     "pose_processor",
@@ -189,7 +190,8 @@ class RetakeResponse(BaseModel):
 class IcLoraExtractResponse(BaseModel):
     conditioning: str
     original: str
-    conditioning_type: Literal["canny", "depth"]
+    conditioning_type: Literal["canny", "depth", "pose", "motion_track"]
+    model_type: Literal["union", "motion_track"]
     frame_time: float
 
 
@@ -296,11 +298,13 @@ class RetakeRequest(BaseModel):
     duration: float
     prompt: str = ""
     mode: str = "replace_audio_and_video"
+    resolution: Literal["540p", "720p", "1080p"] = "540p"
 
 
 class IcLoraExtractRequest(BaseModel):
     video_path: str
-    conditioning_type: Literal["canny", "depth"] = "canny"
+    model_type: Literal["union", "motion_track"] = "union"
+    conditioning_type: Literal["canny", "depth", "pose", "motion_track"] = "canny"
     frame_time: float = 0
 
 
@@ -316,8 +320,12 @@ def _default_ic_lora_images() -> list[IcLoraImageInput]:
 
 class IcLoraGenerateRequest(BaseModel):
     video_path: str
-    conditioning_type: Literal["canny", "depth"]
+    model_type: Literal["union", "motion_track"] = "union"
+    conditioning_type: Literal["canny", "depth", "pose", "motion_track"]
     prompt: NonEmptyPrompt
+    resolution: Literal["540p", "720p", "1080p"] = "540p"
+    aspect_ratio: Literal["16:9", "9:16"] = "16:9"
+    duration: float | None = None
     conditioning_strength: float = 1.0
     num_inference_steps: int = 30
     cfg_guidance_scale: float = 1.0

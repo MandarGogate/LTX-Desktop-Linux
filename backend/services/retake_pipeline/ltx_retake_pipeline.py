@@ -17,8 +17,9 @@ with the following fixes applied in-line (no monkey-patching required):
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Iterator
+import logging
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -33,7 +34,50 @@ from services.retake_pipeline.retake_pipeline import RetakePipeline
 from services.services_utils import sync_device
 
 if TYPE_CHECKING:
+    from services.block_swap.fast_block_swap import FastBlockSwapWrapper
+    from services.vram_manager.vram_manager import VRAMManager
+
+if TYPE_CHECKING:
     from ltx_core.types import LatentState
+
+logger = logging.getLogger(__name__)
+
+
+def _move_value_to_device(value: Any, device: torch.device) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, tuple):
+        items = cast(tuple[Any, ...], value)
+        return tuple(_move_value_to_device(item, device) for item in items)
+    if isinstance(value, list):
+        items = cast(list[Any], value)
+        return [_move_value_to_device(item, device) for item in items]
+    if isinstance(value, dict):
+        entries = cast(dict[object, Any], value)
+        return {key: _move_value_to_device(item, device) for key, item in entries.items()}
+    return value
+
+
+def _force_module_to_device(module: torch.nn.Module, device: torch.device) -> torch.nn.Module:
+    module = module.to(device)
+    for child in module.modules():
+        child.to(device)
+        for value in vars(child).values():
+            if isinstance(value, torch.nn.Module):
+                value.to(device)
+            elif isinstance(value, torch.Tensor):
+                value.data = value.data.to(device)
+    return module
+
+
+def _wrap_model_factory(method: Callable[[], Any], device: torch.device) -> Callable[[], Any]:
+    def _wrapped() -> Any:
+        model = method()
+        if isinstance(model, torch.nn.Module):
+            return _force_module_to_device(model, device)
+        return model
+
+    return _wrapped
 
 
 class LTXRetakePipeline:
@@ -45,6 +89,7 @@ class LTXRetakePipeline:
         *,
         loras: list[LoraPathStrengthAndSDOps] | None = None,
         quantization: QuantizationPolicy | None = None,
+        vram_manager: VRAMManager | None = None,
     ) -> RetakePipeline:
         return LTXRetakePipeline(
             checkpoint_path=checkpoint_path,
@@ -52,6 +97,7 @@ class LTXRetakePipeline:
             device=device,
             loras=loras or [],
             quantization=quantization,
+            vram_manager=vram_manager,
         )
 
     def __init__(
@@ -62,12 +108,17 @@ class LTXRetakePipeline:
         *,
         loras: list[LoraPathStrengthAndSDOps],
         quantization: QuantizationPolicy | None,
+        vram_manager: VRAMManager | None,
     ) -> None:
         from ltx_pipelines.utils import ModelLedger
         from ltx_pipelines.utils.types import PipelineComponents
 
+        from services.vram_manager.vram_manager import VRAMManager
+
         self.device = device
         self.dtype = torch.bfloat16
+        self.vram_manager = vram_manager or VRAMManager(device, 0)
+        self._block_swap_wrapper: FastBlockSwapWrapper | None = None
 
         self.model_ledger = ModelLedger(
             dtype=self.dtype,
@@ -82,6 +133,58 @@ class LTXRetakePipeline:
             dtype=self.dtype,
             device=device,
         )
+
+        self.model_ledger.transformer = _wrap_model_factory(self.model_ledger.transformer, device)
+
+        import ltx_core.text_encoders.gemma as gemma_module
+        import ltx_pipelines.retake as retake_module
+
+        original_encode_text = gemma_module.encode_text
+
+        def _encode_text_on_device(*args: Any, **kwargs: Any) -> Any:
+            return _move_value_to_device(original_encode_text(*args, **kwargs), device)
+
+        gemma_module.encode_text = _encode_text_on_device
+        retake_module.encode_text = _encode_text_on_device
+        try:
+            import ltx_pipelines.retake_pipeline as legacy_retake_module
+
+            legacy_retake_module.encode_text = _encode_text_on_device
+        except ModuleNotFoundError:
+            pass
+
+    def _setup_block_swap_if_needed(self, transformer: torch.nn.Module) -> torch.nn.Module:
+        logger.info("Retake block swap disabled; using regular transformer placement")
+        if self._block_swap_wrapper is not None:
+            self._block_swap_wrapper = None
+        return transformer
+
+    def _move_non_block_parts_to_gpu(self, transformer: torch.nn.Module) -> None:
+        inner = transformer
+        for sub_name in ("velocity_model", "model", "inner_model"):
+            sub = getattr(inner, sub_name, None)
+            if sub is not None:
+                inner = sub
+                break
+
+        for _, param in inner.named_parameters(recurse=False):
+            param.data = param.data.to(self.device)
+        for _, buf in inner.named_buffers(recurse=False):
+            buf.data = buf.data.to(self.device)
+
+        block_attr_names = {"transformer_blocks", "blocks", "layers", "encoder_layers"}
+        for child_name, child in inner.named_children():
+            if child_name not in block_attr_names:
+                child.to(self.device)
+
+        if inner is not transformer:
+            for _, param in transformer.named_parameters(recurse=False):
+                param.data = param.data.to(self.device)
+            for _, buf in transformer.named_buffers(recurse=False):
+                buf.data = buf.data.to(self.device)
+            for _, child in transformer.named_children():
+                if child is not inner:
+                    child.to(self.device)
 
     @torch.no_grad()
     def _run(  # noqa: PLR0913, PLR0915
@@ -100,6 +203,7 @@ class LTXRetakePipeline:
         regenerate_audio: bool = True,
         enhance_prompt: bool = False,
         distilled: bool = False,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> tuple[Iterator[torch.Tensor], Audio]:
         from ltx_core.components.diffusion_steps import EulerDiffusionStep
         from ltx_core.components.guiders import MultiModalGuider
@@ -236,7 +340,15 @@ class LTXRetakePipeline:
         cleanup_memory()
 
         # --- Denoising ---
+        self.vram_manager.cleanup()
         transformer = self.model_ledger.transformer()
+        transformer = self._setup_block_swap_if_needed(transformer)
+        if self._block_swap_wrapper is not None:
+            self._block_swap_wrapper.offload_all()
+            self._move_non_block_parts_to_gpu(transformer)
+            self._block_swap_wrapper.restore_gpu_blocks()
+        else:
+            self.vram_manager.ensure_on_gpu("retake_transformer", transformer)
 
         raw_sigmas: torch.Tensor = (
             torch.tensor(_distilled_sigmas)
@@ -244,6 +356,8 @@ class LTXRetakePipeline:
             else LTX2Scheduler().execute(steps=num_inference_steps)  # type: ignore[no-untyped-call]
         )
         sigmas = raw_sigmas.to(dtype=torch.float32, device=self.device)
+        total_steps = max(1, len(sigmas) - 1)
+        step_counter = [0]
 
         if distilled:
             def denoising_loop(
@@ -252,16 +366,25 @@ class LTXRetakePipeline:
                 audio_state: LatentState,
                 stepper: DiffusionStepProtocol,
             ) -> tuple[LatentState, LatentState]:
+                base_denoise = simple_denoising_func(
+                    video_context=v_context_p,
+                    audio_context=a_context_p,
+                    transformer=cast(Any, transformer),
+                )
+
+                def tracked_denoise(*args: Any, **kwargs: Any) -> Any:
+                    result = base_denoise(*args, **kwargs)
+                    step_counter[0] += 1
+                    if progress_callback is not None:
+                        progress_callback(step_counter[0], total_steps)
+                    return result
+
                 return euler_denoising_loop(
                     sigmas=sigmas,
                     video_state=video_state,
                     audio_state=audio_state,
                     stepper=stepper,
-                    denoise_fn=simple_denoising_func(
-                        video_context=v_context_p,
-                        audio_context=a_context_p,
-                        transformer=transformer,
-                    ),
+                    denoise_fn=tracked_denoise,
                 )
         else:
             assert video_guider_params is not None, "video_guider_params required for non-distilled"
@@ -277,18 +400,27 @@ class LTXRetakePipeline:
                 audio_state: LatentState,
                 stepper: DiffusionStepProtocol,
             ) -> tuple[LatentState, LatentState]:
+                base_denoise = multi_modal_guider_denoising_func(
+                    video_guider,
+                    audio_guider,
+                    v_context=v_context_p,
+                    a_context=a_context_p,
+                    transformer=cast(Any, transformer),
+                )
+
+                def tracked_denoise(*args: Any, **kwargs: Any) -> Any:
+                    result = base_denoise(*args, **kwargs)
+                    step_counter[0] += 1
+                    if progress_callback is not None:
+                        progress_callback(step_counter[0], total_steps)
+                    return result
+
                 return euler_denoising_loop(
                     sigmas=sigmas,
                     video_state=video_state,
                     audio_state=audio_state,
                     stepper=stepper,
-                    denoise_fn=multi_modal_guider_denoising_func(
-                        video_guider,
-                        audio_guider,
-                        v_context=v_context_p,
-                        a_context=a_context_p,
-                        transformer=transformer,
-                    ),
+                    denoise_fn=tracked_denoise,
                 )
 
         video_state, video_tools = noise_video_state(
@@ -318,6 +450,10 @@ class LTXRetakePipeline:
         audio_state = audio_tools.unpatchify(audio_state)
 
         sync_device(self.device)
+        if self._block_swap_wrapper is not None:
+            self._block_swap_wrapper.offload_all()
+        else:
+            self.vram_manager.offload_to_cpu("retake_transformer", transformer)
         del transformer, denoising_loop
         cleanup_memory()
 
@@ -353,6 +489,7 @@ class LTXRetakePipeline:
         regenerate_audio: bool = True,
         enhance_prompt: bool = False,
         distilled: bool = True,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> None:
         fps, num_frames, _, _ = get_videostream_metadata(video_path)
         video_iter, audio = self._run(
@@ -369,6 +506,7 @@ class LTXRetakePipeline:
             regenerate_audio=regenerate_audio,
             enhance_prompt=enhance_prompt,
             distilled=distilled,
+            progress_callback=progress_callback,
         )
         audio_out: Audio | None = audio
         tiling_config = TilingConfig.default()
