@@ -793,17 +793,22 @@ class LTXOptimizedPipeline:
         match self.vram_manager.tier:
             case VRAMTier.HIGH:
                 return TilingConfig(
-                    spatial_config=SpatialTilingConfig(tile_size_in_pixels=384, tile_overlap_in_pixels=64),
-                    temporal_config=TemporalTilingConfig(tile_size_in_frames=48, tile_overlap_in_frames=8),
+                    spatial_config=SpatialTilingConfig(tile_size_in_pixels=512, tile_overlap_in_pixels=64),
+                    temporal_config=TemporalTilingConfig(tile_size_in_frames=64, tile_overlap_in_frames=24),
                 )
             case VRAMTier.MEDIUM:
                 return TilingConfig(
+                    spatial_config=SpatialTilingConfig(tile_size_in_pixels=384, tile_overlap_in_pixels=64),
+                    temporal_config=TemporalTilingConfig(tile_size_in_frames=48, tile_overlap_in_frames=16),
+                )
+            case VRAMTier.LOW:
+                return TilingConfig(
                     spatial_config=SpatialTilingConfig(tile_size_in_pixels=256, tile_overlap_in_pixels=64),
-                    temporal_config=TemporalTilingConfig(tile_size_in_frames=32, tile_overlap_in_frames=8),
+                    temporal_config=TemporalTilingConfig(tile_size_in_frames=32, tile_overlap_in_frames=16),
                 )
             case _:
                 return TilingConfig(
-                    spatial_config=SpatialTilingConfig(tile_size_in_pixels=128, tile_overlap_in_pixels=32),
+                    spatial_config=SpatialTilingConfig(tile_size_in_pixels=128, tile_overlap_in_pixels=64),
                     temporal_config=TemporalTilingConfig(tile_size_in_frames=16, tile_overlap_in_frames=8),
                 )
 

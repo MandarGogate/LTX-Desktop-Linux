@@ -1859,6 +1859,7 @@ class LTXLowVRAMPipeline:
         t_phase4 = _time.perf_counter()
         logger.info("[low-vram-a2v] Phase 4: VAE decode + output")
         tiling_config = self._get_adaptive_tiling_config()
+        self._log_vram_usage("before Phase 4 decode (a2v)")
 
         if self._cached_video_decoder is None:
             video_decoder = self.model_ledger.video_decoder()
@@ -1866,10 +1867,12 @@ class LTXLowVRAMPipeline:
         else:
             video_decoder = self._cached_video_decoder
         self.vram_manager.ensure_on_gpu("video_decoder", video_decoder)
+        self._log_vram_usage("after Phase 4 decoder load (a2v)")
 
         decoded_video = vae_decode_video(
             video_state.latent, video_decoder, tiling_config,
         )
+        self._log_vram_usage("after Phase 4 decode (a2v)")
 
         # Use original audio (not VAE-decoded) for fidelity
         max_samples = round(num_frames / frame_rate * decoded_audio.sampling_rate)
@@ -1886,6 +1889,7 @@ class LTXLowVRAMPipeline:
         )
         self.vram_manager.offload_to_cpu("video_decoder", video_decoder)
         self.vram_manager.cleanup()
+        self._log_vram_usage("after Phase 4 decoder offload (a2v)")
         logger.info("[low-vram-a2v] Phase 4 done: %.2fs", _time.perf_counter() - t_phase4)
         logger.info("[low-vram-a2v] A2V generation complete: %s", output_path)
 
@@ -1906,15 +1910,26 @@ class LTXLowVRAMPipeline:
             case VRAMTier.HIGH:
                 return TilingConfig(
                     spatial_config=SpatialTilingConfig(
+                        tile_size_in_pixels=512,
+                        tile_overlap_in_pixels=64,
+                    ),
+                    temporal_config=TemporalTilingConfig(
+                        tile_size_in_frames=64,
+                        tile_overlap_in_frames=24,
+                    ),
+                )
+            case VRAMTier.MEDIUM:
+                return TilingConfig(
+                    spatial_config=SpatialTilingConfig(
                         tile_size_in_pixels=384,
                         tile_overlap_in_pixels=64,
                     ),
                     temporal_config=TemporalTilingConfig(
                         tile_size_in_frames=48,
-                        tile_overlap_in_frames=8,
+                        tile_overlap_in_frames=16,
                     ),
                 )
-            case VRAMTier.MEDIUM:
+            case VRAMTier.LOW:
                 return TilingConfig(
                     spatial_config=SpatialTilingConfig(
                         tile_size_in_pixels=256,
@@ -1922,14 +1937,14 @@ class LTXLowVRAMPipeline:
                     ),
                     temporal_config=TemporalTilingConfig(
                         tile_size_in_frames=32,
-                        tile_overlap_in_frames=8,
+                        tile_overlap_in_frames=16,
                     ),
                 )
             case _:
                 return TilingConfig(
                     spatial_config=SpatialTilingConfig(
                         tile_size_in_pixels=128,
-                        tile_overlap_in_pixels=32,
+                        tile_overlap_in_pixels=64,
                     ),
                     temporal_config=TemporalTilingConfig(
                         tile_size_in_frames=16,

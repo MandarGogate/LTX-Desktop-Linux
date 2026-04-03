@@ -187,9 +187,33 @@ class TestLowVRAMPipelineRegressions:
         tiling = pipeline._get_a2v_decode_tiling_config()
 
         assert tiling is not None
-        assert tiling.spatial_config.tile_size_in_pixels == 384
+        assert tiling.spatial_config.tile_size_in_pixels == 512
         assert tiling.spatial_config.tile_overlap_in_pixels == 64
-        assert tiling.temporal_config.tile_size_in_frames == 48
+        assert tiling.temporal_config.tile_size_in_frames == 64
+        assert tiling.temporal_config.tile_overlap_in_frames == 24
+
+    def test_adaptive_tiling_low_tier_uses_higher_overlap(self) -> None:
+        pipeline = object.__new__(LTXLowVRAMPipeline)
+        pipeline.vram_manager = _DummyVRAMManager(tier=VRAMTier.LOW)
+
+        tiling = pipeline._get_adaptive_tiling_config()
+
+        assert tiling is not None
+        assert tiling.spatial_config.tile_size_in_pixels == 256
+        assert tiling.spatial_config.tile_overlap_in_pixels == 64
+        assert tiling.temporal_config.tile_size_in_frames == 32
+        assert tiling.temporal_config.tile_overlap_in_frames == 16
+
+    def test_adaptive_tiling_very_low_tier_uses_max_spatial_overlap(self) -> None:
+        pipeline = object.__new__(LTXLowVRAMPipeline)
+        pipeline.vram_manager = _DummyVRAMManager(tier=VRAMTier.VERY_LOW)
+
+        tiling = pipeline._get_adaptive_tiling_config()
+
+        assert tiling is not None
+        assert tiling.spatial_config.tile_size_in_pixels == 128
+        assert tiling.spatial_config.tile_overlap_in_pixels == 64
+        assert tiling.temporal_config.tile_size_in_frames == 16
         assert tiling.temporal_config.tile_overlap_in_frames == 8
 
     def test_split_video_vae_decoder_sd_ops_accepts_split_layout(self) -> None:
