@@ -1,6 +1,9 @@
 """FastAPI composition root for the LTX backend server."""
+import faulthandler
 import os
 import sys
+
+faulthandler.enable(file=sys.stderr, all_threads=True)
 from typing import Any, cast
 
 if os.environ.get("BACKEND_DEBUG") == "1":
@@ -27,6 +30,10 @@ import torch
 
 import services.patches.record_stream_fix as _record_stream_fix  # pyright: ignore[reportUnusedImport]  # Remove once ltx-core includes the fix
 del _record_stream_fix
+import services.patches.safetensors_loader_fix as _safetensors_loader_fix  # pyright: ignore[reportUnusedImport]  # Remove once safetensors/PyTorch fix the mmap issue
+del _safetensors_loader_fix
+import services.patches.safetensors_metadata_fix as _safetensors_metadata_fix  # pyright: ignore[reportUnusedImport]  # Remove once safetensors supports read-only mmap
+del _safetensors_metadata_fix
 
 from state.app_settings import AppSettings
 

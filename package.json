@@ -1,6 +1,6 @@
 {
   "name": "ltx-desktop",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "LTX-2 Video Generation - Desktop App",
   "type": "module",
   "main": "dist-electron/main.js",
