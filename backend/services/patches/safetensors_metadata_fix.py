@@ -18,14 +18,25 @@ from __future__ import annotations
 
 import json
 import struct
+from typing import Any, cast
 
 
 def _read_safetensors_metadata(path: str) -> dict[str, str] | None:
     """Read metadata from a safetensors file header without mmap."""
     with open(path, "rb") as f:
         header_size = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_size).decode("utf-8"))
-    return header.get("__metadata__")
+        header_obj = json.loads(f.read(header_size).decode("utf-8"))
+    header = cast(dict[str, Any], header_obj) if isinstance(header_obj, dict) else None
+    if not isinstance(header, dict):
+        return None
+    metadata_obj = header.get("__metadata__")
+    if not isinstance(metadata_obj, dict):
+        return None
+    metadata: dict[str, str] = {}
+    for key, value in cast(dict[object, object], metadata_obj).items():
+        if isinstance(key, str) and isinstance(value, str):
+            metadata[key] = value
+    return metadata
 
 
 # --- Patch 1: SafetensorsModelStateDictLoader.metadata ---
@@ -33,11 +44,12 @@ def _read_safetensors_metadata(path: str) -> dict[str, str] | None:
 from ltx_core.loader.sft_loader import SafetensorsModelStateDictLoader
 
 
-def _patched_model_metadata(self: SafetensorsModelStateDictLoader, path: str) -> dict:
+def _patched_model_metadata(self: SafetensorsModelStateDictLoader, path: str) -> dict[str, Any]:
     meta = _read_safetensors_metadata(path)
     if meta is None or "config" not in meta:
         return {}
-    return json.loads(meta["config"])
+    parsed = json.loads(meta["config"])
+    return cast(dict[str, Any], parsed) if isinstance(parsed, dict) else {}
 
 
 assert hasattr(SafetensorsModelStateDictLoader, "metadata") and callable(
@@ -50,6 +62,8 @@ SafetensorsModelStateDictLoader.metadata = _patched_model_metadata  # type: igno
 
 import ltx_pipelines.ic_lora as _ic_lora_module
 
+_ic_lora_module_any = cast(Any, _ic_lora_module)
+
 
 def _patched_read_lora_reference_downscale_factor(lora_path: str) -> int:
     try:
@@ -61,15 +75,21 @@ def _patched_read_lora_reference_downscale_factor(lora_path: str) -> int:
         return 1
 
 
-assert hasattr(_ic_lora_module, "_read_lora_reference_downscale_factor"), (
+assert hasattr(_ic_lora_module_any, "_read_lora_reference_downscale_factor"), (
     "ltx_pipelines.ic_lora._read_lora_reference_downscale_factor not found — patch needs updating."
 )
-_ic_lora_module._read_lora_reference_downscale_factor = _patched_read_lora_reference_downscale_factor
+setattr(
+    _ic_lora_module_any,
+    "_read_lora_reference_downscale_factor",
+    _patched_read_lora_reference_downscale_factor,
+)
 
 
 # --- Patch 3: ltx_pipelines.utils.constants.detect_params ---
 
 import ltx_pipelines.utils.constants as _constants_module
+
+_constants_module_any = cast(Any, _constants_module)
 
 
 _original_detect_params = _constants_module.detect_params
@@ -84,19 +104,20 @@ def _patched_detect_params(checkpoint_path: str) -> object:
         version = meta.get("model_version", "")
     except Exception:
         logger.warning("Could not read checkpoint metadata from %s, using defaults", checkpoint_path)
-        return _constants_module.LTX_2_PARAMS
+        return _constants_module_any.LTX_2_PARAMS
 
-    if version.startswith(_constants_module._LTX_2_3_MODEL_VERSION_PREFIX):
-        return _constants_module.LTX_2_3_PARAMS
+    version_prefix = cast(str, getattr(_constants_module_any, "_LTX_2_3_MODEL_VERSION_PREFIX"))
+    if version.startswith(version_prefix):
+        return _constants_module_any.LTX_2_3_PARAMS
 
     logger.info("Using LTX_2_PARAMS for checkpoint (version=%s)", version or "unknown")
-    return _constants_module.LTX_2_PARAMS
+    return _constants_module_any.LTX_2_PARAMS
 
 
-assert hasattr(_constants_module, "detect_params"), (
+assert hasattr(_constants_module_any, "detect_params"), (
     "ltx_pipelines.utils.constants.detect_params not found — patch needs updating."
 )
-_constants_module.detect_params = _patched_detect_params
+_constants_module_any.detect_params = _patched_detect_params
 
 
 # --- Patch 4: services.text_encoder.ltx_text_encoder.TextHandler.get_model_id_from_checkpoint ---

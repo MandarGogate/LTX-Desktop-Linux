@@ -50,7 +50,6 @@ def _build_schema() -> dict[str, object]:
             use_sage_attention=False,
             camera_motion_prompts=FAKE_CAMERA_MOTION_PROMPTS,
             default_negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-            dev_mode=False,
         )
 
         fake = FakeServices()

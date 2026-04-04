@@ -18,23 +18,29 @@ Usage:
 from __future__ import annotations
 
 import functools
+import importlib
 import itertools
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 import torch
 from torch import nn
 
-from ltx_core.layer_streaming import LayerStreamingWrapper
+try:
+    _layer_streaming_module = importlib.import_module("ltx_core.layer_streaming")
+    _LayerStreamingWrapper = getattr(_layer_streaming_module, "LayerStreamingWrapper", None)
+except ImportError:
+    _LayerStreamingWrapper = None
 
 
-def _patched_register_hooks(self: LayerStreamingWrapper) -> None:
+def _patched_register_hooks(self: Any) -> None:
     idx_map: dict[int, int] = {id(layer): idx for idx, layer in enumerate(self._layers)}
     num_layers = len(self._layers)
 
     compute_stream = torch.cuda.current_stream(self._target_device)
 
     gpu_refs: dict[int, list[torch.Tensor]] = {}
-    ref_events: dict[int, torch.cuda.Event] = {}
+    ref_events: dict[int, Any] = {}
 
     def _drain_completed_refs() -> None:
         for layer_idx in list(ref_events):
@@ -82,18 +88,21 @@ def _patched_register_hooks(self: LayerStreamingWrapper) -> None:
         self._hooks.extend([h1, h2])
 
 
-_original_teardown = LayerStreamingWrapper.teardown
+_original_teardown = cast(Callable[[Any], None] | None, getattr(_LayerStreamingWrapper, "teardown", None))
 
 
-def _patched_teardown(self: LayerStreamingWrapper) -> None:
+def _patched_teardown(self: Any) -> None:
     # Clear held GPU references before the original teardown evicts layers.
     if hasattr(self, "_gpu_refs"):
         torch.cuda.synchronize(device=self._target_device)
         self._gpu_refs.clear()
         self._ref_events.clear()
-    _original_teardown(self)
+    if _original_teardown is not None:
+        _original_teardown(self)
 
 
-# Apply patches.
-LayerStreamingWrapper._register_hooks = _patched_register_hooks  # type: ignore[assignment]
-LayerStreamingWrapper.teardown = _patched_teardown  # type: ignore[assignment]
+# Apply patches only when the upstream wrapper exists in the installed package.
+if _LayerStreamingWrapper is not None:
+    wrapper: Any = _LayerStreamingWrapper
+    wrapper._register_hooks = _patched_register_hooks  # type: ignore[assignment]
+    wrapper.teardown = _patched_teardown  # type: ignore[assignment]

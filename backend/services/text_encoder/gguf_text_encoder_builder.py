@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import MethodType, SimpleNamespace
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -99,6 +100,37 @@ def patch_gemma_forward_hidden_states_only(text_encoder: torch.nn.Module) -> Non
     setattr(model, "_ltx_hidden_states_only_patched", True)
 
 
+def _resolve_checkpoint_sources(checkpoint_sources: Any) -> list[str]:
+    if isinstance(checkpoint_sources, (list, tuple)):
+        candidates = [str(path) for path in cast(tuple[object, ...] | list[object], checkpoint_sources)]
+    else:
+        candidates = [str(checkpoint_sources)]
+
+    resolved: list[str] = []
+    for candidate in candidates:
+        candidate_path = Path(candidate)
+        if candidate_path.exists():
+            resolved.append(str(candidate_path))
+            continue
+
+        if candidate_path.name == "model_variant.safetensors" and candidate_path.parent.exists():
+            siblings = sorted(
+                path for path in candidate_path.parent.glob("*.safetensors") if path.name != candidate_path.name
+            )
+            if siblings:
+                logger.info(
+                    "Falling back from missing text encoder alias %s to %s",
+                    candidate_path,
+                    siblings[0],
+                )
+                resolved.append(str(siblings[0]))
+                continue
+
+        resolved.append(str(candidate_path))
+
+    return resolved
+
+
 @dataclass(frozen=True)
 class GGUFGemmaTextEncoderBuilder:
     """Build a Gemma text encoder with GGUF-backed language-model weights."""
@@ -116,10 +148,7 @@ class GGUFGemmaTextEncoderBuilder:
         text_encoder = _materialize_meta_module_on_cpu(text_encoder)
 
         checkpoint_sources = getattr(self.base_builder, "model_path", self.checkpoint_path)
-        if isinstance(checkpoint_sources, (list, tuple)):
-            checkpoint_paths = [str(path) for path in checkpoint_sources]
-        else:
-            checkpoint_paths = [str(checkpoint_sources)]
+        checkpoint_paths = _resolve_checkpoint_sources(checkpoint_sources)
 
         checkpoint_sd = self.base_builder.model_loader.load(
             checkpoint_paths,
@@ -127,17 +156,16 @@ class GGUFGemmaTextEncoderBuilder:
             device=torch.device("cpu"),
         )
         checkpoint_state = checkpoint_sd.sd
-        if target_dtype is not None:
-            checkpoint_state = {
-                key: value.to(dtype=target_dtype) for key, value in checkpoint_state.items()
-            }
+        checkpoint_state = {
+            key: value.to(dtype=target_dtype) for key, value in checkpoint_state.items()
+        }
         text_encoder.load_state_dict(checkpoint_state, strict=False, assign=True)
 
         if getattr(text_encoder, "model", None) is None:
             raise ValueError("Gemma text encoder missing language model component")
 
         text_encoder.model = load_gemma_text_model_from_gguf(
-            text_encoder.model,
+            cast(torch.nn.Module, text_encoder.model),
             self.gguf_path,
             dtype=target_dtype,
         )

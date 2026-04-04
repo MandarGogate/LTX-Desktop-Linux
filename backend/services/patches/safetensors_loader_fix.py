@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import mmap
-import os
 import struct
 import warnings
 from typing import Any
@@ -97,13 +96,11 @@ def _patched_load(
     for shard_path in model_paths:
         tensors = _load_safetensors_direct(shard_path)
         for name, value in tensors.items():
-            expected_name = name if sd_ops is None else sd_ops.apply_to_key(name)
+            expected_name = sd_ops.apply_to_key(name)
             if expected_name is None:
                 continue
             value = value.to(device=device, non_blocking=True, copy=False)
-            key_value_pairs = ((expected_name, value),)
-            if sd_ops is not None:
-                key_value_pairs = sd_ops.apply_to_key_value(expected_name, value)
+            key_value_pairs = sd_ops.apply_to_key_value(expected_name, value)
             for key, value in key_value_pairs:
                 size += value.nbytes
                 dtype.add(value.dtype)

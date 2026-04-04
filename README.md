@@ -2,23 +2,7 @@
 
 A fork of **LTX Desktop** with major additions for **GGUF**, **lower-VRAM local inference**, **custom LoRA support**, and a new **browser-based web mode**.
 
-It lets you run the app as a standalone local web app backed by the same FastAPI backend.
-
-<p align="center">
-  <img src="images/gen-space.png" alt="Gen Space" width="70%">
-</p>
-
-<p align="center">
-  <img src="images/video-editor.png" alt="Video Editor" width="70%">
-</p>
-
-<p align="center">
-  <img src="images/timeline-gap-fill.png" alt="Timeline gap fill" width="70%">
-</p>
-
-## What this fork adds vs upstream
-
-Compared with `LTX-Desktop`, this fork adds or expands:
+Compared with `LTX-Desktop`, this fork adds:
 
 - **Web mode**: run the app in a browser without Electron
 - **Low-VRAM local generation pipeline** for consumer NVIDIA GPUs
@@ -26,27 +10,16 @@ Compared with `LTX-Desktop`, this fork adds or expands:
 - **Sequential offloading + block swap** for transformer and text encoder
 - **SageAttention integration** for faster attention kernels where supported
 - **GGUF video model support** including GPU-tier-based quant recommendations
-- **Lazy GGUF loading / faster GGUF loading paths**
+- **Lazy GGUF loading**
 - **Custom model selection** for:
   - diffusion checkpoints / GGUF files
   - LoRAs
   - text encoder variants
   - upscaler
   - processor models
-- **Multiple LoRA support** with configurable strengths
-- **GPU-aware model readiness checks** and suggested download bundles
+- **Multiple custom LoRA support**
 - **VRAM profile endpoint/UI** and GPU stats widget
-- **Expanded processor/model file support**:
-  - GGUF checkpoints
-  - distilled LoRA
-  - IC-LoRA
-  - depth processor
-  - pose processor
-  - person detector
-  - text encoder variants
-  - Z-Image Turbo model selection
 - **Improved first-run setup** for local model recommendations
-- **Gemini-powered prompt suggestion flows** for timeline gaps / imported assets
 
 ## Features
 
@@ -65,8 +38,8 @@ Compared with `LTX-Desktop`, this fork adds or expands:
 
 | Platform / hardware | Generation mode | Notes |
 | --- | --- | --- |
-| Windows + NVIDIA CUDA GPU | Local generation supported | Recommended for 11GB+ VRAM, with tier-based limits |
-| Linux + NVIDIA CUDA GPU | Local generation supported | Recommended for 11GB+ VRAM, with tier-based limits |
+| Windows + NVIDIA CUDA GPU | Local generation supported | Recommended for 11GB+ VRAM |
+| Linux + NVIDIA CUDA GPU | Local generation supported | Recommended for 11GB+ VRAM |
 | macOS (Apple Silicon builds) | Not supported | - |
 
 ## VRAM requirements and local generation tiers
