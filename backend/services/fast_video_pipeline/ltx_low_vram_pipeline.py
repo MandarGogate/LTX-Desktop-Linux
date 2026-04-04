@@ -75,6 +75,27 @@ def _make_dev_sigmas(steps: int) -> list[float]:
     return sigmas.tolist()
 
 
+def _find_text_encoder_variant_path(gemma_root: str | None) -> str | None:
+    """Best-effort local variant discovery for direct pipeline construction.
+
+    App-driven flows pass an explicit `text_encoder_variant_path` through
+    `PipelinesHandler`, but direct callers like GPU integration tests build the
+    pipeline from file paths only. In that case, prefer the first local
+    safetensors/GGUF text-encoder variant found alongside the tokenizer files.
+    """
+    if not gemma_root:
+        return None
+
+    root = Path(gemma_root)
+    if not root.exists():
+        return None
+
+    for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+        if path.is_file() and path.suffix.lower() in {".safetensors", ".gguf"}:
+            return str(path)
+    return None
+
+
 def _get_official_dev_guidance_defaults() -> tuple[str, Any, Any]:
     """Return the official LTX 2.3 dev negative prompt and guider params."""
     from ltx_core.components.guiders import MultiModalGuiderParams
@@ -301,7 +322,7 @@ class LTXLowVRAMPipeline:
         self._lora_strength = lora_strength
         self._extra_loras = extra_loras or []
         self._num_inference_steps = num_inference_steps
-        self._text_encoder_variant_path = text_encoder_variant_path
+        self._text_encoder_variant_path = text_encoder_variant_path or _find_text_encoder_variant_path(gemma_root)
         self._use_upscaler = use_upscaler
         self._a2v_decode_tiling = a2v_decode_tiling
 

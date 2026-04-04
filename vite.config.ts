@@ -8,7 +8,7 @@ const isWebMode = process.env.WEB_MODE === 'true'
 
 export default defineConfig({
   define: {
-    '__ELECTRON__': isWebMode ? false : 'void 0',
+    '__ELECTRON__': isWebMode ? false : 'undefined',
   },
   plugins: [
     react(),

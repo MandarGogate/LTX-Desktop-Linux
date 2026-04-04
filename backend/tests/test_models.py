@@ -34,7 +34,7 @@ class TestModelsList:
         assert "8 steps" in data[0]["description"]
         assert data[1]["id"] == "balanced"
         assert data[2]["id"] == "quality"
-        assert "20 steps" in data[2]["description"]
+        assert "30 steps" in data[2]["description"]
         assert data[3]["id"] == "custom"
 
     def test_custom_pro_steps(self, client, test_state):

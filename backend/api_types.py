@@ -60,6 +60,7 @@ VideoCameraMotion = Literal[
     "static",
     "focus_shift",
 ]
+RetakeMode: TypeAlias = Literal["replace_audio_and_video", "replace_video", "replace_audio"]
 
 
 # ============================================================
