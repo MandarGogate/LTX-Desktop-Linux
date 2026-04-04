@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -10,6 +11,8 @@ from services.fast_video_pipeline.ltx_low_vram_pipeline import (
     _build_split_video_vae_sd_ops,
 )
 from services.fast_video_pipeline.ltx_optimized_pipeline import LTXOptimizedPipeline
+from services.ic_lora_pipeline import ltx_ic_lora_pipeline as ic_lora_module
+from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
 from services.vram_manager.vram_manager import OffloadStrategy, VRAMTier
 
 
@@ -354,6 +357,144 @@ class TestLowVRAMPipelineRegressions:
         assert pipeline.vram_manager.ensure_calls == 1
         assert pipeline.vram_manager.cleanup_calls == 3
         assert pipeline._block_swap_wrapper is not None
+
+
+class _LedgerStub:
+    def __init__(self, factory: Callable[[], nn.Module]) -> None:
+        self.transformer = factory
+
+
+class _ICPipelineStub:
+    def __init__(self, stage1_factory: Callable[[], nn.Module], stage2_factory: Callable[[], nn.Module]) -> None:
+        self.stage_1_model_ledger = _LedgerStub(stage1_factory)
+        self.stage_2_model_ledger = _LedgerStub(stage2_factory)
+
+
+class TestIcLoraPipelineRegressions:
+    def test_generate_preserves_ledgers_during_inference(self, monkeypatch) -> None:
+        pipeline = object.__new__(LTXIcLoraPipeline)
+        pipeline.device = torch.device("cpu")
+        pipeline.vram_manager = _DummyVRAMManager(offload_strategy=OffloadStrategy.BLOCK_SWAP)
+        pipeline._block_swap_wrapper_stage1 = None
+        pipeline._block_swap_wrapper_stage2 = None
+
+        stage1_calls = {"count": 0}
+        stage2_calls = {"count": 0}
+        stage1_transformer = _TransformerWrapper(block_count=6)
+        stage2_transformer = _TransformerWrapper(block_count=4)
+
+        def stage1_factory() -> nn.Module:
+            stage1_calls["count"] += 1
+            return stage1_transformer
+
+        def stage2_factory() -> nn.Module:
+            stage2_calls["count"] += 1
+            return stage2_transformer
+
+        pipeline.pipeline = _ICPipelineStub(stage1_factory, stage2_factory)
+        pipeline._original_transformer_factory_stage1 = pipeline.pipeline.stage_1_model_ledger.transformer
+        pipeline._original_transformer_factory_stage2 = pipeline.pipeline.stage_2_model_ledger.transformer
+
+        setup_calls: list[tuple[int, nn.Module]] = []
+        move_calls: list[nn.Module] = []
+        seen_during_inference: dict[str, nn.Module] = {}
+
+        def _setup(transformer: nn.Module, stage: int) -> nn.Module:
+            setup_calls.append((stage, transformer))
+            wrapper = _WrapperStub()
+            if stage == 1:
+                pipeline._block_swap_wrapper_stage1 = wrapper
+            else:
+                pipeline._block_swap_wrapper_stage2 = wrapper
+            return transformer
+
+        def _move(transformer: nn.Module) -> None:
+            move_calls.append(transformer)
+
+        def _run_inference(**_: object) -> tuple[torch.Tensor, None]:
+            seen_during_inference["stage1"] = pipeline.pipeline.stage_1_model_ledger.transformer()
+            seen_during_inference["stage2"] = pipeline.pipeline.stage_2_model_ledger.transformer()
+            return torch.zeros(1), None
+
+        pipeline._setup_block_swap_if_needed = _setup  # type: ignore[method-assign]
+        pipeline._move_non_block_parts_to_gpu = _move  # type: ignore[method-assign]
+        pipeline._run_inference = _run_inference  # type: ignore[method-assign]
+
+        monkeypatch.setattr(ic_lora_module, "encode_video_output", lambda **_: None)
+        monkeypatch.setattr(ic_lora_module, "video_chunks_number", lambda *_: 1)
+
+        pipeline.generate(
+            prompt="test",
+            seed=1,
+            height=512,
+            width=512,
+            num_frames=9,
+            frame_rate=16.0,
+            images=[],
+            video_conditioning=[],
+            output_path="/tmp/out.mp4",
+        )
+
+        assert stage1_calls["count"] == 1
+        assert stage2_calls["count"] == 1
+        assert setup_calls == []
+        assert move_calls == []
+        assert seen_during_inference["stage1"] is stage1_transformer
+        assert seen_during_inference["stage2"] is stage2_transformer
+        assert pipeline._block_swap_wrapper_stage1 is None
+        assert pipeline._block_swap_wrapper_stage2 is None
+
+    def test_generate_block_swap_skips_stage2_setup_when_requested(self, monkeypatch) -> None:
+        pipeline = object.__new__(LTXIcLoraPipeline)
+        pipeline.device = torch.device("cpu")
+        pipeline.vram_manager = _DummyVRAMManager(offload_strategy=OffloadStrategy.BLOCK_SWAP)
+        pipeline._block_swap_wrapper_stage1 = None
+        pipeline._block_swap_wrapper_stage2 = None
+
+        stage1_transformer = _TransformerWrapper(block_count=6)
+        stage2_calls = {"count": 0}
+
+        pipeline.pipeline = _ICPipelineStub(
+            lambda: stage1_transformer,
+            lambda: stage2_calls.__setitem__("count", stage2_calls["count"] + 1) or _TransformerWrapper(block_count=4),
+        )
+        pipeline._original_transformer_factory_stage1 = pipeline.pipeline.stage_1_model_ledger.transformer
+        pipeline._original_transformer_factory_stage2 = pipeline.pipeline.stage_2_model_ledger.transformer
+
+        def _setup(transformer: nn.Module, stage: int) -> nn.Module:
+            if stage == 1:
+                pipeline._block_swap_wrapper_stage1 = _WrapperStub()
+            else:
+                pipeline._block_swap_wrapper_stage2 = _WrapperStub()
+            return transformer
+
+        pipeline._setup_block_swap_if_needed = _setup  # type: ignore[method-assign]
+        pipeline._move_non_block_parts_to_gpu = lambda transformer: None  # type: ignore[method-assign]
+        pipeline._run_inference = lambda **_: (
+            pipeline.pipeline.stage_1_model_ledger.transformer(),
+            torch.zeros(1),
+            None,
+        )[1:]  # type: ignore[method-assign]
+
+        monkeypatch.setattr(ic_lora_module, "encode_video_output", lambda **_: None)
+        monkeypatch.setattr(ic_lora_module, "video_chunks_number", lambda *_: 1)
+
+        pipeline.generate(
+            prompt="test",
+            seed=1,
+            height=512,
+            width=512,
+            num_frames=9,
+            frame_rate=16.0,
+            images=[],
+            video_conditioning=[],
+            output_path="/tmp/out.mp4",
+            skip_stage_2=True,
+        )
+
+        assert stage2_calls["count"] == 0
+        assert pipeline._block_swap_wrapper_stage1 is None
+        assert pipeline._block_swap_wrapper_stage2 is None
 
 
 class TestOptimizedPipelineRegressions:

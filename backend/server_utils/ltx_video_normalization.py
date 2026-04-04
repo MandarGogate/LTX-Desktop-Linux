@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import shutil
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,15 @@ class NormalizedVideoInfo:
     normalized_width: int
     normalized_height: int
     fps: float
+
+
+@dataclass(frozen=True)
+class TemporalChunk:
+    index: int
+    start_frame: int
+    frame_count: int
+    keep_start_frame: int
+    keep_frame_count: int
 
 
 def snap_frames_to_8k_plus_1(num_frames: int) -> int:
@@ -129,6 +139,273 @@ def normalize_video_for_ltx(
         normalized_height=normalized_height,
         fps=fps,
     )
+
+
+def plan_temporal_chunks(
+    *,
+    total_frames: int,
+    max_chunk_frames: int,
+    overlap_frames: int,
+) -> list[TemporalChunk]:
+    chunk_frames = snap_frames_to_8k_plus_1(max_chunk_frames)
+    if total_frames <= chunk_frames:
+        return [
+            TemporalChunk(
+                index=0,
+                start_frame=0,
+                frame_count=total_frames,
+                keep_start_frame=0,
+                keep_frame_count=total_frames,
+            )
+        ]
+
+    safe_overlap = max(1, min(overlap_frames, chunk_frames - 1))
+    step = max(1, chunk_frames - safe_overlap)
+    starts = [0]
+    while True:
+        last = starts[-1]
+        if last + chunk_frames >= total_frames:
+            break
+        next_start = last + step
+        final_start = max(0, total_frames - chunk_frames)
+        if next_start >= final_start:
+            if final_start > last:
+                starts.append(final_start)
+            break
+        starts.append(next_start)
+
+    boundaries: list[int] = [0]
+    for idx in range(len(starts) - 1):
+        current_start = starts[idx]
+        next_start = starts[idx + 1]
+        current_end = min(total_frames, current_start + chunk_frames)
+        next_end = min(total_frames, next_start + chunk_frames)
+        overlap_start = next_start
+        overlap_end = min(current_end, next_end)
+        if overlap_end <= overlap_start:
+            boundaries.append(next_start)
+            continue
+        boundaries.append(overlap_start + ((overlap_end - overlap_start) // 2))
+    boundaries.append(total_frames)
+
+    chunks: list[TemporalChunk] = []
+    for idx, start in enumerate(starts):
+        keep_global_start = boundaries[idx]
+        keep_global_end = boundaries[idx + 1]
+        chunks.append(
+            TemporalChunk(
+                index=idx,
+                start_frame=start,
+                frame_count=min(chunk_frames, total_frames - start),
+                keep_start_frame=max(0, keep_global_start - start),
+                keep_frame_count=max(0, keep_global_end - keep_global_start),
+            )
+        )
+    return chunks
+
+
+def extract_video_frame_range(
+    *,
+    video_path: str,
+    output_path: str,
+    start_frame: int,
+    frame_count: int,
+) -> None:
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open video: {video_path}")
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 24.0)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    if width <= 0 or height <= 0:
+        cap.release()
+        raise RuntimeError(f"Failed to read video dimensions: {video_path}")
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        output_path,
+        cv2.VideoWriter.fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+
+    written = 0
+    frame_idx = 0
+    try:
+        while written < frame_count:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if frame_idx >= start_frame:
+                writer.write(frame)
+                written += 1
+            frame_idx += 1
+    finally:
+        cap.release()
+        writer.release()
+
+    if written != frame_count:
+        raise RuntimeError(
+            f"Video slice produced {written} frame(s), expected {frame_count}: {video_path}"
+        )
+
+
+def extract_video_frame_to_image(
+    *,
+    video_path: str,
+    output_path: str,
+    frame_idx: int,
+) -> None:
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open video: {video_path}")
+
+    try:
+        if frame_idx > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            raise RuntimeError(
+                f"Failed to extract frame {frame_idx} from video: {video_path}"
+            )
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(output_path, frame):
+            raise RuntimeError(f"Failed to write frame image: {output_path}")
+    finally:
+        cap.release()
+
+
+def trim_video_for_frame_range(
+    *,
+    video_path: str,
+    output_path: str,
+    fps: float,
+    start_frame: int,
+    frame_count: int,
+) -> None:
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open video: {video_path}")
+
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    source_fps = float(cap.get(cv2.CAP_PROP_FPS) or fps or 24.0)
+    if width <= 0 or height <= 0:
+        cap.release()
+        raise RuntimeError(f"Failed to read video dimensions: {video_path}")
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        output_path,
+        cv2.VideoWriter.fourcc(*"mp4v"),
+        source_fps,
+        (width, height),
+    )
+
+    written = 0
+    frame_idx = 0
+    try:
+        while written < frame_count:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if frame_idx >= start_frame:
+                writer.write(frame)
+                written += 1
+            frame_idx += 1
+    finally:
+        cap.release()
+        writer.release()
+
+    if written != frame_count:
+        raise RuntimeError(
+            f"Trimmed video produced {written} frame(s), expected {frame_count}: {video_path}"
+        )
+
+
+def concat_videos(
+    *,
+    input_paths: list[str],
+    output_path: str,
+) -> None:
+    if not input_paths:
+        raise RuntimeError("No input videos provided for concatenation")
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as manifest:
+        manifest_path = Path(manifest.name)
+        for path in input_paths:
+            manifest.write(f"file '{path}'\n")
+
+    try:
+        # The trimmed chunks are encoded with a consistent codec/format, so we
+        # can concatenate via stream copy and avoid one more lossy re-encode as
+        # well as the huge files produced by MPEG-4 qscale output.
+        _run_ffmpeg(
+            [
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(manifest_path),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                output_path,
+            ]
+        )
+    finally:
+        manifest_path.unlink(missing_ok=True)
+
+
+def mux_video_with_audio(
+    *,
+    video_path: str,
+    audio_source_path: str,
+    output_path: str,
+    audio_start_time: float = 0.0,
+    audio_duration: float | None = None,
+) -> None:
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        "-y",
+        "-i",
+        video_path,
+    ]
+    if audio_start_time > 0:
+        command.extend(["-ss", f"{audio_start_time:.6f}"])
+    if audio_duration is not None:
+        command.extend(["-t", f"{audio_duration:.6f}"])
+    command.extend(
+        [
+            "-i",
+            audio_source_path,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0?",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            output_path,
+        ]
+    )
+    _run_ffmpeg(command)
 
 
 def downsample_video_temporally_for_ltx(

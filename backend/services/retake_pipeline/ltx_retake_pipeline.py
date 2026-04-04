@@ -154,9 +154,43 @@ class LTXRetakePipeline:
             pass
 
     def _setup_block_swap_if_needed(self, transformer: torch.nn.Module) -> torch.nn.Module:
-        logger.info("Retake block swap disabled; using regular transformer placement")
+        """Wrap transformer with block swap if strategy requires it.
+
+        Reuses the existing wrapper if available to avoid accumulating
+        duplicate forward hooks on every generation call.
+        """
+        from services.block_swap.fast_block_swap import FastBlockSwapWrapper
+        from services.vram_manager.vram_manager import OffloadStrategy
+
+        if self.vram_manager.offload_strategy not in (
+            OffloadStrategy.BLOCK_SWAP,
+            OffloadStrategy.BLOCK_SWAP_AGGRESSIVE,
+        ):
+            logger.info("Retake: block swap not needed for offload strategy %s", self.vram_manager.offload_strategy.value)
+            return transformer
+
+        # Reuse existing wrapper — hooks are already installed on the modules
         if self._block_swap_wrapper is not None:
+            self._block_swap_wrapper.restore_gpu_blocks()
+            logger.info("Retake: reusing existing block swap wrapper")
+            return transformer
+
+        blocks_on_gpu = self.vram_manager.block_swap_keep_on_gpu
+        logger.info("Retake: setting up block swap, keeping %d blocks on GPU", blocks_on_gpu)
+
+        self._block_swap_wrapper = FastBlockSwapWrapper(
+            transformer=transformer,
+            device=self.device,
+            blocks_to_keep_on_gpu=blocks_on_gpu,
+            prefetch_distance=2,
+        )
+        self._block_swap_wrapper._default_blocks_to_keep_on_gpu = blocks_on_gpu  # type: ignore[attr-defined]
+        self._block_swap_wrapper._default_prefetch_distance = 2  # type: ignore[attr-defined]
+
+        if self._block_swap_wrapper.block_count == 0:
+            logger.warning("Retake: block swap found 0 blocks — falling back to sequential offloading")
             self._block_swap_wrapper = None
+
         return transformer
 
     def _move_non_block_parts_to_gpu(self, transformer: torch.nn.Module) -> None:

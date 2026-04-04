@@ -64,7 +64,7 @@ _RESOLUTION_MAP_16_9: dict[VRAMTier, dict[str, tuple[int, int]]] = {
 # With async prefetch, keeping 2-3 blocks gives good overlap.
 _BLOCK_SWAP_KEEP_ON_GPU: dict[VRAMTier, int] = {
     VRAMTier.HIGH: 5,       # Keep 5 of 48 blocks — FP8 block=370MB → ~1.85GB
-    VRAMTier.MEDIUM: 5,     # Keep 5 of 48 blocks on GPU
+    VRAMTier.MEDIUM: 4,     # More conservative than HIGH for 16-24GB low-VRAM runs
     VRAMTier.LOW: 3,        # Keep 3 of 48 blocks on GPU
     VRAMTier.VERY_LOW: 2,   # Keep only 2 of 48 blocks on GPU
 }

@@ -69,12 +69,22 @@ export function useIcLora() {
               status = `Preprocessing control video (${data.currentStep}/${data.totalSteps})`
             } else if (data.phase === 'loading_model') {
               status = 'Loading model...'
+            } else if (data.phase === 'denoising_stage_1') {
+              status = data.totalSteps && data.currentStep !== undefined && data.currentStep !== null
+                ? `Denoising stage 1 (${data.currentStep}/${data.totalSteps})`
+                : 'Denoising stage 1...'
+              progress = Math.max(prev.progress, progress)
+            } else if (data.phase === 'denoising_stage_2') {
+              status = data.totalSteps && data.currentStep !== undefined && data.currentStep !== null
+                ? `Denoising stage 2 (${data.currentStep}/${data.totalSteps})`
+                : 'Denoising stage 2...'
+              progress = Math.max(prev.progress, progress)
             } else if (data.phase === 'inference') {
               status = 'Generating...'
-              progress = Math.max(progress, Math.min(97, prev.progress + 2))
+              progress = Math.max(prev.progress, progress)
             } else if (data.phase === 'retrying_low_vram') {
               status = 'Retrying in low-VRAM mode...'
-              progress = Math.max(progress, Math.min(70, prev.progress + 1))
+              progress = Math.max(prev.progress, Math.min(70, progress))
             } else if (data.phase === 'complete') {
               status = 'Finalizing...'
               progress = 95

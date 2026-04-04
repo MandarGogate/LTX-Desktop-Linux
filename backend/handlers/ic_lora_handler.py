@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import gc
 import logging
 import math
 import time
@@ -32,7 +33,16 @@ from state.conditioning_cache import ConditioningCacheEntry, ConditioningCacheKe
 from services.interfaces import VideoProcessor
 from services.services_utils import FrameArray
 from services.vram_manager.vram_manager import VRAMManager
-from server_utils.ltx_video_normalization import downsample_video_temporally_for_ltx, snap_frames_to_8k_plus_1
+from server_utils.ltx_video_normalization import (
+    concat_videos,
+    downsample_video_temporally_for_ltx,
+    extract_video_frame_range,
+    extract_video_frame_to_image,
+    mux_video_with_audio,
+    plan_temporal_chunks,
+    snap_frames_to_8k_plus_1,
+    trim_video_for_frame_range,
+)
 from server_utils.motion_track_overlay import create_motion_track_overlay_video
 from state.app_state_types import AppState, ICLoraState
 
@@ -45,7 +55,81 @@ logger = logging.getLogger(__name__)
 _UNION_CONDITIONING_TYPES = {"canny", "depth", "pose"}
 
 
+def _chunk_image_inputs(
+    images: list[ImageConditioningInput],
+    *,
+    chunk_start_frame: int,
+    chunk_frame_count: int,
+) -> list[ImageConditioningInput]:
+    if chunk_frame_count <= 0:
+        return []
+
+    chunk_end_frame = chunk_start_frame + chunk_frame_count
+    localized: list[ImageConditioningInput] = []
+    for img in images:
+        if img.frame_idx < chunk_start_frame:
+            localized.append(
+                ImageConditioningInput(
+                    path=img.path,
+                    frame_idx=0,
+                    strength=img.strength,
+                )
+            )
+        elif img.frame_idx < chunk_end_frame:
+            localized.append(
+                ImageConditioningInput(
+                    path=img.path,
+                    frame_idx=img.frame_idx - chunk_start_frame,
+                    strength=img.strength,
+                )
+            )
+
+    return localized
+
+
+def _ic_lora_inference_progress(
+    *,
+    phase: str,
+    current_step: int | None,
+    total_steps: int | None,
+    skip_stage_2: bool,
+) -> tuple[int, int | None, int | None]:
+    if total_steps is None or total_steps <= 0 or current_step is None:
+        match phase:
+            case "denoising_stage_1":
+                return (50, current_step, total_steps)
+            case "denoising_stage_2":
+                return (75 if not skip_stage_2 else 95, current_step, total_steps)
+            case _:
+                return (50, current_step, total_steps)
+
+    clamped_step = max(0, min(current_step, total_steps))
+    if phase == "denoising_stage_1":
+        start = 50
+        end = 95 if skip_stage_2 else 75
+    elif phase == "denoising_stage_2":
+        start = 75
+        end = 95
+    else:
+        start = 50
+        end = 95
+
+    progress = start + math.floor(((end - start) * clamped_step) / max(total_steps, 1))
+    return (progress, clamped_step, total_steps)
+
+
 class IcLoraHandler(StateHandlerBase):
+    @staticmethod
+    def _resolve_stage_2_block_swap_policy(
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+    ) -> tuple[int, int, str] | None:
+        if max(width, height) >= 1792 and num_frames > 57:
+            return (1, 1, "ic-lora-stage2-1080p-long")
+        return None
+
     def __init__(
         self,
         state: AppState,
@@ -213,7 +297,126 @@ class IcLoraHandler(StateHandlerBase):
             aspect_ratio,
         )
         max_frames = manager.get_max_frames(width, height, max(1, int(round(fps))))
+
+        # IC-LoRA is much less memory-stable than the main video pipelines.
+        # The generic VRAM estimator is too optimistic here and can keep long
+        # clips on the non-chunked path, which then OOMs at 720p/1080p.
+        # Use conservative per-resolution caps so longer clips chunk earlier.
+        resolution_cap = 161
+        if max(width, height) >= 1792:
+            resolution_cap = 81
+        elif max(width, height) >= 1280:
+            resolution_cap = 113
+
+        max_frames = min(max_frames, resolution_cap)
         return width, height, max_frames
+
+    def _run_ic_lora_generate_with_retry(
+        self,
+        *,
+        ic_state: ICLoraState,
+        prompt: str,
+        seed: int,
+        height: int,
+        width: int,
+        num_frames: int,
+        frame_rate: float,
+        images: list[ImageConditioningInput],
+        control_video_path: str,
+        conditioning_strength: float,
+        output_path: str,
+        source_audio_path: str,
+        source_audio_start_time: float = 0.0,
+        source_audio_max_duration: float | None = None,
+        progress_callback: Any = None,
+    ) -> None:
+        stage_2_policy = self._resolve_stage_2_block_swap_policy(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+        )
+
+        def _configure_stage_2_policy(for_skip_stage_2: bool) -> None:
+            clear_policy = getattr(ic_state.pipeline, "clear_generation_stage_2_block_swap_policy", None)
+            if for_skip_stage_2 or stage_2_policy is None:
+                if callable(clear_policy):
+                    clear_policy()
+                return
+
+            set_policy = getattr(ic_state.pipeline, "set_generation_stage_2_block_swap_policy", None)
+            if callable(set_policy):
+                blocks_to_keep_on_gpu, prefetch_distance, reason = stage_2_policy
+                set_policy(
+                    blocks_to_keep_on_gpu=blocks_to_keep_on_gpu,
+                    prefetch_distance=prefetch_distance,
+                    reason=reason,
+                )
+
+        skip_stage_2 = False
+        should_retry_low_vram = False
+        try:
+            _configure_stage_2_policy(skip_stage_2)
+            ic_state.pipeline.generate(
+                prompt=prompt,
+                seed=seed,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                frame_rate=frame_rate,
+                images=images,
+                video_conditioning=[(control_video_path, conditioning_strength)],
+                output_path=output_path,
+                source_audio_path=source_audio_path,
+                source_audio_start_time=source_audio_start_time,
+                source_audio_max_duration=source_audio_max_duration,
+                skip_stage_2=skip_stage_2,
+                progress_callback=progress_callback,
+            )
+            return
+        except torch.OutOfMemoryError:
+            logger.warning("[ic-lora] Retrying generation with skip_stage_2 due to OOM")
+            should_retry_low_vram = True
+
+        if not should_retry_low_vram:
+            return
+
+        # Important: retry outside the except block. While the exception is
+        # active, its traceback can keep large tensors/modules alive and make a
+        # low-VRAM retry fail immediately with almost no free CUDA memory.
+        skip_stage_2 = True
+        self._generation.update_progress("retrying_low_vram", 60, 0, 1)
+        gc.collect()
+        if hasattr(ic_state.pipeline, "_cleanup_generation_state"):
+            try:
+                getattr(ic_state.pipeline, "_cleanup_generation_state")()
+            except Exception:
+                logger.debug("[ic-lora] Pipeline retry cleanup failed", exc_info=True)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            ipc_collect = getattr(torch.cuda, "ipc_collect", None)
+            if callable(ipc_collect):
+                try:
+                    ipc_collect()
+                except Exception:
+                    logger.debug("[ic-lora] torch.cuda.ipc_collect failed", exc_info=True)
+
+        _configure_stage_2_policy(skip_stage_2)
+        ic_state.pipeline.generate(
+            prompt=prompt,
+            seed=seed,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            frame_rate=frame_rate,
+            images=images,
+            video_conditioning=[(control_video_path, conditioning_strength)],
+            output_path=output_path,
+            source_audio_path=source_audio_path,
+            source_audio_start_time=source_audio_start_time,
+            source_audio_max_duration=source_audio_max_duration,
+            skip_stage_2=skip_stage_2,
+            progress_callback=progress_callback,
+        )
 
     def generate(self, req: IcLoraGenerateRequest) -> IcLoraGenerateResponse:
         if self._generation.is_generation_running():
@@ -356,7 +559,8 @@ class IcLoraHandler(StateHandlerBase):
                     cache_key, ConditioningCacheEntry(control_video_path, frame_count, fps)
                 )
 
-            if frame_count > supported_frames or (frame_count - 1) % 8 != 0:
+            use_chunked_generation = frame_count > supported_frames and fps > 0
+            if not use_chunked_generation and ((frame_count - 1) % 8 != 0):
                 normalized = downsample_video_temporally_for_ltx(
                     video_path=control_video_path,
                     output_dir=self.config.outputs_dir / "_normalized_inputs",
@@ -385,46 +589,161 @@ class IcLoraHandler(StateHandlerBase):
 
             self._generation.update_progress("inference", 50, 0, 1)
 
+            seed = self._resolve_seed()
+
             output_path = (
                 self.config.outputs_dir / f"ic_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
             )
 
             t_inference_start = time.perf_counter()
             skip_stage_2 = False
-            try:
-                ic_state.pipeline.generate(
-                    prompt=req.prompt,
-                    seed=self._resolve_seed(),
-                    height=height,
-                    width=width,
-                    num_frames=frame_count,
-                    frame_rate=fps,
-                    images=images,
-                    video_conditioning=[(control_video_path, req.conditioning_strength)],
-                    output_path=str(output_path),
-                    source_audio_path=str(video_path),
-                    source_audio_max_duration=frame_count / fps if fps > 0 else None,
+
+            def _progress_callback(phase: str, current_step: int | None, total_steps: int | None) -> None:
+                progress, effective_step, effective_total = _ic_lora_inference_progress(
+                    phase=phase,
+                    current_step=current_step,
+                    total_steps=total_steps,
                     skip_stage_2=skip_stage_2,
                 )
-            except torch.OutOfMemoryError:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                self._generation.update_progress("retrying_low_vram", 60, 0, 1)
-                skip_stage_2 = True
-                logger.warning("[ic-lora] Retrying generation with skip_stage_2 due to OOM")
-                ic_state.pipeline.generate(
+                self._generation.update_progress(phase, progress, effective_step, effective_total)
+
+            if use_chunked_generation:
+                overlap_frames = 17 if supported_frames > 33 else max(1, supported_frames // 4)
+                chunk_frame_budget = supported_frames
+                if max(width, height) >= 1792:
+                    chunk_frame_budget = min(chunk_frame_budget, 113)
+                chunks = plan_temporal_chunks(
+                    total_frames=frame_count,
+                    max_chunk_frames=chunk_frame_budget,
+                    overlap_frames=overlap_frames,
+                )
+                logger.info(
+                    "[ic-lora] Using temporal chunking: %d chunks (frames=%d chunk=%d overlap=%d fps=%.2f)",
+                    len(chunks),
+                    frame_count,
+                    chunks[0].frame_count,
+                    overlap_frames,
+                    fps,
+                )
+                chunk_control_paths: list[str] = []
+                for chunk in chunks:
+                    chunk_control_path = str(
+                        self.config.outputs_dir / "_normalized_inputs" / f"ltx_ic_chunk_control_{uuid.uuid4().hex[:8]}.mp4"
+                    )
+                    extract_video_frame_range(
+                        video_path=control_video_path,
+                        output_path=chunk_control_path,
+                        start_frame=chunk.start_frame,
+                        frame_count=chunk.frame_count,
+                    )
+                    chunk_control_paths.append(chunk_control_path)
+                chunk_output_paths: list[str] = []
+                trimmed_chunk_paths: list[str] = []
+                previous_chunk_bridge_image: str | None = None
+                for chunk, chunk_control_path in zip(chunks, chunk_control_paths, strict=True):
+                    chunk_output_path = str(
+                        self.config.outputs_dir / f"ic_lora_chunk_{uuid.uuid4().hex[:8]}.mp4"
+                    )
+                    local_images = _chunk_image_inputs(
+                        images,
+                        chunk_start_frame=chunk.start_frame,
+                        chunk_frame_count=chunk.frame_count,
+                    )
+                    if previous_chunk_bridge_image is not None:
+                        local_images = [
+                            ImageConditioningInput(
+                                path=previous_chunk_bridge_image,
+                                frame_idx=0,
+                                strength=1.0,
+                            ),
+                            *local_images,
+                        ]
+                    logger.info(
+                        "[ic-lora] Chunk %d/%d: start=%d frames=%d keep=%d+%d",
+                        chunk.index + 1,
+                        len(chunks),
+                        chunk.start_frame,
+                        chunk.frame_count,
+                        chunk.keep_start_frame,
+                        chunk.keep_frame_count,
+                    )
+                    self._run_ic_lora_generate_with_retry(
+                        ic_state=ic_state,
+                        prompt=req.prompt,
+                        seed=seed,
+                        height=height,
+                        width=width,
+                        num_frames=chunk.frame_count,
+                        frame_rate=fps,
+                        images=local_images,
+                        control_video_path=chunk_control_path,
+                        conditioning_strength=req.conditioning_strength,
+                        output_path=chunk_output_path,
+                        source_audio_path=str(video_path),
+                        source_audio_start_time=chunk.start_frame / fps,
+                        source_audio_max_duration=chunk.frame_count / fps,
+                        progress_callback=_progress_callback,
+                    )
+                    chunk_output_paths.append(chunk_output_path)
+                    bridge_frame_idx = max(
+                        0,
+                        min(
+                            chunk.frame_count - 1,
+                            chunk.keep_start_frame + chunk.keep_frame_count - 1,
+                        ),
+                    )
+                    previous_chunk_bridge_image = str(
+                        self.config.outputs_dir / "_normalized_inputs" / f"ltx_ic_chunk_bridge_{uuid.uuid4().hex[:8]}.png"
+                    )
+                    extract_video_frame_to_image(
+                        video_path=chunk_output_path,
+                        output_path=previous_chunk_bridge_image,
+                        frame_idx=bridge_frame_idx,
+                    )
+                    trimmed_chunk_path = str(
+                        self.config.outputs_dir / f"ic_lora_chunk_trim_{uuid.uuid4().hex[:8]}.mp4"
+                    )
+                    trim_video_for_frame_range(
+                        video_path=chunk_output_path,
+                        output_path=trimmed_chunk_path,
+                        fps=fps,
+                        start_frame=chunk.keep_start_frame,
+                        frame_count=chunk.keep_frame_count,
+                    )
+                    trimmed_chunk_paths.append(trimmed_chunk_path)
+                    if chunk.index + 1 < len(chunks):
+                        ic_state = self._pipelines.reload_ic_lora_during_generation(
+                            str(lora_path),
+                            str(depth_model_path) if depth_model_path is not None else None,
+                            str(pose_model_path) if pose_model_path is not None else None,
+                            str(person_detector_model_path) if person_detector_model_path is not None else None,
+                        )
+                concat_output_path = str(
+                    self.config.outputs_dir / f"ic_lora_concat_{uuid.uuid4().hex[:8]}.mp4"
+                )
+                concat_videos(input_paths=trimmed_chunk_paths, output_path=concat_output_path)
+                mux_video_with_audio(
+                    video_path=concat_output_path,
+                    audio_source_path=str(video_path),
+                    output_path=str(output_path),
+                    audio_duration=frame_count / fps if fps > 0 else None,
+                )
+            else:
+                self._run_ic_lora_generate_with_retry(
+                    ic_state=ic_state,
                     prompt=req.prompt,
-                    seed=self._resolve_seed(),
+                    seed=seed,
                     height=height,
                     width=width,
                     num_frames=frame_count,
                     frame_rate=fps,
                     images=images,
-                    video_conditioning=[(control_video_path, req.conditioning_strength)],
+                    control_video_path=control_video_path,
+                    conditioning_strength=req.conditioning_strength,
                     output_path=str(output_path),
                     source_audio_path=str(video_path),
                     source_audio_max_duration=frame_count / fps if fps > 0 else None,
-                    skip_stage_2=skip_stage_2,
+                    progress_callback=_progress_callback,
                 )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] Inference: %.2fs", t_inference_end - t_inference_start)
@@ -442,13 +761,16 @@ class IcLoraHandler(StateHandlerBase):
 
             self._generation.update_progress("complete", 100, 1, 1)
             self._generation.complete_generation(str(output_path))
+            self._pipelines.unload_gpu_pipeline()
             return IcLoraGenerateResponse(status="complete", video_path=str(output_path))
 
         except HTTPError:
             self._generation.fail_generation("IC-LoRA generation failed")
+            self._pipelines.unload_gpu_pipeline()
             raise
         except Exception as exc:
             self._generation.fail_generation(str(exc))
+            self._pipelines.unload_gpu_pipeline()
             if "cancelled" in str(exc).lower():
                 return IcLoraGenerateResponse(status="cancelled")
             raise HTTPError(500, f"Generation error: {exc}") from exc

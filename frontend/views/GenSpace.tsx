@@ -928,6 +928,7 @@ export function GenSpace() {
       duration: number
       videoDuration: number
     }
+    mode: 'replace_audio_and_video' | 'replace_video' | 'replace_audio'
   } | null>(null)
   const icLoraSubmissionRef = useRef<{
     prompt: string
@@ -992,6 +993,7 @@ export function GenSpace() {
     videoDuration: 0,
     ready: false,
   })
+  const [retakeMode, setRetakeMode] = useState<'replace_audio_and_video' | 'replace_video' | 'replace_audio'>('replace_audio_and_video')
   const [retakePanelKey, setRetakePanelKey] = useState(0)
   const [retakeInitial, setRetakeInitial] = useState<{
     videoUrl: string | null
@@ -1140,10 +1142,10 @@ export function GenSpace() {
   }, [icLoraError])
 
   useEffect(() => {
-    if (isRetaking || isIcLoraGenerating || isGenerating || retakeResult || icLoraResult || videoUrl || imageUrl) {
+    if (isRetaking || isIcLoraGenerating || isGenerating || retakeResult || icLoraResult || videoUrl || imageUrls.length > 0) {
       setLocalError(null)
     }
-  }, [isRetaking, isIcLoraGenerating, isGenerating, retakeResult, icLoraResult, videoUrl, imageUrl])
+  }, [isRetaking, isIcLoraGenerating, isGenerating, retakeResult, icLoraResult, videoUrl, imageUrls])
 
   // Keep the selected model for A2V; only clamp geometry needed by the active path.
   useEffect(() => {
@@ -1415,13 +1417,14 @@ export function GenSpace() {
           duration: retakeInput.duration,
           videoDuration: retakeInput.videoDuration,
         },
+        mode: retakeMode,
       }
       await submitRetake({
         videoPath: retakeInput.videoPath,
         startTime: retakeInput.startTime,
         duration: retakeInput.duration,
         prompt,
-        mode: 'replace_audio_and_video',
+        mode: retakeMode,
         resolution: settings.videoResolution as '540p' | '720p' | '1080p',
       })
       return
@@ -1671,7 +1674,7 @@ export function GenSpace() {
           {/* Assets grid — fills remaining space, scrollable */}
           <div className="overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable] flex-1">
             <div className={`grid ${gallerySizeClasses[gallerySize]} gap-4`}>
-              {isGenerating && (
+              {promptGenerating && (
                 <div className="relative rounded-xl overflow-hidden bg-zinc-800 aspect-video">
                   <div className="absolute inset-0 flex flex-col items-center justify-center">
                     <div className="relative w-16 h-16 mb-3">
@@ -1681,10 +1684,10 @@ export function GenSpace() {
                         <Sparkles className="h-6 w-6 text-violet-400" />
                       </div>
                     </div>
-                    <p className="text-sm text-zinc-400">{mode === 'retake' ? (retakeStatus || 'Generating...') : mode === 'ic-lora' ? (icLoraStatus || 'Generating...') : (statusMessage || 'Generating...')}</p>
-                    {(mode === 'retake' ? retakeProgress : mode === 'ic-lora' ? icLoraProgress : progress) > 0 && (
+                    <p className="text-sm text-zinc-400">{isRetakeMode ? (retakeStatus || 'Generating...') : isIcLoraMode ? (icLoraStatus || 'Generating...') : (statusMessage || 'Generating...')}</p>
+                    {(isRetakeMode ? retakeProgress : isIcLoraMode ? icLoraProgress : progress) > 0 && (
                       <div className="w-32 h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
-                        <div className="h-full bg-violet-500 transition-all" style={{ width: `${mode === 'retake' ? retakeProgress : mode === 'ic-lora' ? icLoraProgress : progress}%` }} />
+                        <div className="h-full bg-violet-500 transition-all" style={{ width: `${isRetakeMode ? retakeProgress : isIcLoraMode ? icLoraProgress : progress}%` }} />
                       </div>
                     )}
                   </div>
@@ -1720,6 +1723,8 @@ export function GenSpace() {
             processingStatus={retakeStatus}
             resolution={settings.videoResolution as '540p' | '720p' | '1080p'}
             onResolutionChange={(resolution) => setSettings(prev => ({ ...prev, videoResolution: resolution }))}
+            retakeMode={retakeMode}
+              onRetakeModeChange={setRetakeMode}
             onChange={(data) => setRetakeInput(data)}
           />
         </div>

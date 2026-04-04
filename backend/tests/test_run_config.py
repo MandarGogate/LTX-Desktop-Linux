@@ -27,6 +27,7 @@ class TestRunModeOverride:
     def test_medium_vram_override(self) -> None:
         mgr = VRAMManager(torch.device("cpu"), 8, user_run_mode="medium_vram")
         assert mgr.tier == VRAMTier.MEDIUM
+        assert mgr.block_swap_keep_on_gpu == 4
 
     def test_very_low_vram_override(self) -> None:
         mgr = VRAMManager(torch.device("cpu"), 48, user_run_mode="very_low_vram")
@@ -88,7 +89,7 @@ class TestProfileDictExtensions:
         assert profile["user_blocks_on_gpu"] == 10
         assert profile["user_run_mode"] == "low_vram"
         assert profile["auto_tier"] == "medium"  # 16GB auto
-        assert profile["auto_blocks_on_gpu"] == 5  # MEDIUM tier default
+        assert profile["auto_blocks_on_gpu"] == 4  # MEDIUM tier default
         assert profile["max_blocks"] == 48
         assert isinstance(profile["run_modes"], list)
         assert len(profile["run_modes"]) == 5

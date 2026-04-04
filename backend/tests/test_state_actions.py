@@ -10,6 +10,8 @@ from runtime_config.model_download_specs import resolve_model_path
 from state.app_settings import UpdateSettingsRequest
 from state.app_state_types import (
     CpuSlot,
+    GenerationRunning,
+    GenerationProgress,
     GpuSlot,
     ICLoraState,
     RetakePipelineState,
@@ -202,6 +204,49 @@ def test_retake_pipeline_eviction(test_state):
     assert isinstance(test_state.state.gpu_slot.active_pipeline, VideoPipelineState)
 
 
+def test_retake_pipeline_rebuilds_when_checkpoint_selection_changes(test_state, monkeypatch):
+    checkpoint_a = test_state.models.models_dir / "diffusion_models" / "retake-a.safetensors"
+    checkpoint_b = test_state.models.models_dir / "diffusion_models" / "retake-b.safetensors"
+    checkpoint_a.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_a.write_bytes(b"\x00" * 1024)
+    checkpoint_b.write_bytes(b"\x00" * 1024)
+    test_state.state.app_settings.preferred_model_path = str(checkpoint_a)
+
+    created: list[str] = []
+
+    class StubRetakePipeline:
+        pass
+
+    def fake_create(
+        checkpoint_path: str,
+        gemma_root: str | None,
+        device: object,
+        *,
+        loras: list[object] | None = None,
+        quantization: object | None = None,
+        vram_manager: object | None = None,
+    ) -> StubRetakePipeline:
+        del gemma_root, device, loras, quantization, vram_manager
+        created.append(checkpoint_path)
+        return StubRetakePipeline()
+
+    monkeypatch.setattr(
+        test_state.pipelines._retake_pipeline_class,
+        "create",
+        staticmethod(fake_create),
+    )
+
+    first_state = test_state.pipelines.load_retake_pipeline(distilled=True)
+    test_state.state.app_settings.preferred_model_path = str(checkpoint_b)
+    second_state = test_state.pipelines.load_retake_pipeline(distilled=True)
+
+    assert first_state is not second_state
+    assert created == [str(checkpoint_a), str(checkpoint_b)]
+    assert isinstance(test_state.state.gpu_slot, GpuSlot)
+    assert isinstance(test_state.state.gpu_slot.active_pipeline, RetakePipelineState)
+    assert test_state.state.gpu_slot.active_pipeline.checkpoint_path == str(checkpoint_b)
+
+
 def test_ic_lora_load_includes_depth_resources(test_state, fake_services):
     lora_path = str(_model_path(test_state,"ic_lora"))
     depth_path = str(_model_path(test_state,"depth_processor"))
@@ -257,3 +302,22 @@ def test_ic_lora_unload_clears_preprocessing_resources(test_state):
     test_state.pipelines.unload_gpu_pipeline()
 
     assert test_state.state.gpu_slot is None
+
+
+def test_reload_ic_lora_during_generation_preserves_generation_state(test_state, fake_services):
+    lora_path = str(_model_path(test_state, "ic_lora"))
+    depth_path = str(_model_path(test_state, "depth_processor"))
+    test_state.pipelines.load_ic_lora(lora_path, depth_path)
+    running = GenerationRunning(
+        id="gen-1",
+        progress=GenerationProgress(phase="inference", progress=50, current_step=1, total_steps=2),
+    )
+    assert test_state.state.gpu_slot is not None
+    test_state.state.gpu_slot.generation = running
+
+    reloaded = test_state.pipelines.reload_ic_lora_during_generation(lora_path, depth_path)
+
+    assert isinstance(reloaded, ICLoraState)
+    assert test_state.state.gpu_slot is not None
+    assert test_state.state.gpu_slot.generation is running
+    assert test_state.state.gpu_slot.active_pipeline is reloaded

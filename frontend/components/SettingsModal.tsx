@@ -257,21 +257,6 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
     })
   }
 
-  const handleProStepsChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const steps = Math.max(1, Math.min(100, parseInt(e.target.value) || 20))
-    onSettingsChange({
-      ...settings,
-      proModel: { ...settings.proModel, steps },
-    })
-  }
-
-  const handleProUpscalerToggle = () => {
-    onSettingsChange({
-      ...settings,
-      proModel: { ...settings.proModel, useUpscaler: !settings.proModel.useUpscaler },
-    })
-  }
-
   const handleCustomStepsChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const steps = Math.max(1, Math.min(100, parseInt(e.target.value) || 20))
     onSettingsChange({

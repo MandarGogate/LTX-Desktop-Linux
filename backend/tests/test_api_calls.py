@@ -214,6 +214,7 @@ class TestRetake:
         data = r.json()
         assert data["status"] == "complete"
         assert data["video_path"]
+        assert test_state.state.gpu_slot is None
 
     def test_local_retake_mode_mapping(self, client, test_state, create_fake_model_files, fake_services):
         create_fake_model_files(include_zit=False)
@@ -259,6 +260,21 @@ class TestRetake:
         retake_call = fake_services.retake_pipeline.generate_calls[-1]
         _, _, width, height = get_videostream_metadata(retake_call["video_path"])
         assert (width, height) == (1280, 704)
+
+    def test_local_retake_oom_recovers_gpu_state(self, client, test_state, create_fake_model_files, fake_services):
+        import torch
+
+        create_fake_model_files(include_zit=False)
+        test_state.state.app_settings.use_local_text_encoder = True
+        test_state.config.force_api_generations = False
+        fake_services.retake_pipeline.raise_on_generate = torch.OutOfMemoryError("CUDA out of memory")
+
+        video_path = self._make_valid_video(test_state)
+        r = client.post("/api/retake", json=self._base_payload(video_path))
+
+        assert r.status_code == 500
+        assert "CUDA out of memory" in r.json()["error"]
+        assert test_state.state.gpu_slot is None
 
     def test_prefers_api_video_routes_retake_to_api(self, client, test_state, fake_services):
         test_state.config.force_api_generations = False

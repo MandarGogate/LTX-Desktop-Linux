@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Protocol
 
 from api_types import ImageConditioningInput
 
 if TYPE_CHECKING:
     import torch
+
+
+IcLoraProgressCallback = Callable[[str, int | None, int | None], None]
 
 
 class IcLoraPipeline(Protocol):
@@ -18,8 +22,8 @@ class IcLoraPipeline(Protocol):
         upsampler_path: str,
         lora_path: str,
         device: torch.device,
-    ) -> "IcLoraPipeline":
-        ...
+        vram_manager: Any | None = None,
+    ) -> "IcLoraPipeline": ...
 
     def generate(
         self,
@@ -37,5 +41,5 @@ class IcLoraPipeline(Protocol):
         source_audio_start_time: float = 0.0,
         source_audio_max_duration: float | None = None,
         skip_stage_2: bool = False,
-    ) -> None:
-        ...
+        progress_callback: IcLoraProgressCallback | None = None,
+    ) -> None: ...

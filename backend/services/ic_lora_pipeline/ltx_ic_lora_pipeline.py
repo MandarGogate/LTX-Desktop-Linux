@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from typing import Any, cast
 
 import torch
 
 from api_types import ImageConditioningInput
-from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
+from services.ltx_pipeline_common import (
+    default_tiling_config,
+    encode_video_output,
+    video_chunks_number,
+)
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
+
+from .ic_lora_pipeline import IcLoraProgressCallback
 
 
 def _move_value_to_device(value: Any, device: torch.device) -> Any:
@@ -23,11 +30,15 @@ def _move_value_to_device(value: Any, device: torch.device) -> Any:
         return [_move_value_to_device(item, device) for item in items]
     if isinstance(value, dict):
         entries = cast(dict[object, Any], value)
-        return {key: _move_value_to_device(item, device) for key, item in entries.items()}
+        return {
+            key: _move_value_to_device(item, device) for key, item in entries.items()
+        }
     return value
 
 
-def _force_module_to_device(module: torch.nn.Module, device: torch.device) -> torch.nn.Module:
+def _force_module_to_device(
+    module: torch.nn.Module, device: torch.device
+) -> torch.nn.Module:
     """Best-effort device fixup for upstream IC-LoRA models.
 
     Some upstream IC-LoRA builds can retain nested linear weights on CPU even
@@ -49,7 +60,9 @@ def _force_module_to_device(module: torch.nn.Module, device: torch.device) -> to
     return module
 
 
-def _wrap_model_factory(method: Callable[[], Any], device: torch.device) -> Callable[[], Any]:
+def _wrap_model_factory(
+    method: Callable[[], Any], device: torch.device
+) -> Callable[[], Any]:
     def _wrapped() -> Any:
         model = method()
         if isinstance(model, torch.nn.Module):
@@ -67,6 +80,7 @@ class LTXIcLoraPipeline:
         upsampler_path: str,
         lora_path: str,
         device: torch.device,
+        vram_manager: Any | None = None,
     ) -> "LTXIcLoraPipeline":
         return LTXIcLoraPipeline(
             checkpoint_path=checkpoint_path,
@@ -83,6 +97,7 @@ class LTXIcLoraPipeline:
         upsampler_path: str,
         lora_path: str,
         device: torch.device,
+        vram_manager: Any | None = None,
     ) -> None:
         from ltx_core.loader.primitives import LoraPathStrengthAndSDOps
         from ltx_core.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
@@ -91,14 +106,18 @@ class LTXIcLoraPipeline:
 
         self.device = device
 
-        lora_entry = LoraPathStrengthAndSDOps(path=lora_path, strength=1.0, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
+        lora_entry = LoraPathStrengthAndSDOps(
+            path=lora_path, strength=1.0, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP
+        )
         self.pipeline = ICLoraPipeline(
             distilled_checkpoint_path=checkpoint_path,
             spatial_upsampler_path=upsampler_path,
             gemma_root=cast(str, gemma_root),
             loras=[lora_entry],
             device=device,
-            quantization=QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None,
+            quantization=QuantizationPolicy.fp8_cast()
+            if device_supports_fp8(device)
+            else None,
         )
 
         self.pipeline.stage_1_model_ledger.transformer = _wrap_model_factory(
@@ -132,21 +151,96 @@ class LTXIcLoraPipeline:
         tiling_config: TilingConfigType,
         *,
         skip_stage_2: bool = False,
+        progress_callback: IcLoraProgressCallback | None = None,
     ) -> tuple[torch.Tensor | Iterator[torch.Tensor], AudioOrNone]:
         from ltx_pipelines.utils.args import ImageConditioningInput as _LtxImageInput
 
-        return self.pipeline(
-            prompt=prompt,
-            seed=seed,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            frame_rate=frame_rate,
-            images=[_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images],
-            video_conditioning=video_conditioning,
-            tiling_config=tiling_config,
-            skip_stage_2=skip_stage_2,
-        )
+        if progress_callback is None:
+            return self.pipeline(
+                prompt=prompt,
+                seed=seed,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                frame_rate=frame_rate,
+                images=[
+                    _LtxImageInput(img.path, img.frame_idx, img.strength) for img in images
+                ],
+                video_conditioning=video_conditioning,
+                tiling_config=tiling_config,
+                skip_stage_2=skip_stage_2,
+            )
+
+        import ltx_pipelines.ic_lora as ic_lora_module
+        from ltx_pipelines.utils.helpers import post_process_latent
+        from tqdm import tqdm
+
+        original_euler_denoising_loop = ic_lora_module.euler_denoising_loop
+        stage_index = 0
+
+        def _euler_denoising_loop_with_progress(
+            sigmas: torch.Tensor,
+            video_state: Any,
+            audio_state: Any,
+            stepper: Any,
+            denoise_fn: Any,
+        ) -> tuple[Any, Any]:
+            nonlocal stage_index
+            stage_index += 1
+            total_steps = max(int(sigmas.shape[0]) - 1, 0)
+            phase = f"denoising_stage_{stage_index}"
+            progress_callback(phase, 0, total_steps)
+
+            for step_idx, _ in enumerate(tqdm(sigmas[:-1])):
+                denoised_video, denoised_audio = denoise_fn(
+                    video_state,
+                    audio_state,
+                    sigmas,
+                    step_idx,
+                )
+
+                denoised_video = post_process_latent(
+                    denoised_video,
+                    video_state.denoise_mask,
+                    video_state.clean_latent,
+                )
+                denoised_audio = post_process_latent(
+                    denoised_audio,
+                    audio_state.denoise_mask,
+                    audio_state.clean_latent,
+                )
+
+                video_state = replace(
+                    video_state,
+                    latent=stepper.step(video_state.latent, denoised_video, sigmas, step_idx),
+                )
+                audio_state = replace(
+                    audio_state,
+                    latent=stepper.step(audio_state.latent, denoised_audio, sigmas, step_idx),
+                )
+                progress_callback(phase, step_idx + 1, total_steps)
+
+            progress_callback(phase, total_steps, total_steps)
+            return (video_state, audio_state)
+
+        ic_lora_module.euler_denoising_loop = _euler_denoising_loop_with_progress
+        try:
+            return self.pipeline(
+                prompt=prompt,
+                seed=seed,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                frame_rate=frame_rate,
+                images=[
+                    _LtxImageInput(img.path, img.frame_idx, img.strength) for img in images
+                ],
+                video_conditioning=video_conditioning,
+                tiling_config=tiling_config,
+                skip_stage_2=skip_stage_2,
+            )
+        finally:
+            ic_lora_module.euler_denoising_loop = original_euler_denoising_loop
 
     @torch.inference_mode()
     def generate(
@@ -165,6 +259,7 @@ class LTXIcLoraPipeline:
         source_audio_start_time: float = 0.0,
         source_audio_max_duration: float | None = None,
         skip_stage_2: bool = False,
+        progress_callback: IcLoraProgressCallback | None = None,
     ) -> None:
         source_audio: AudioOrNone = None
         if source_audio_path is not None:
@@ -178,9 +273,14 @@ class LTXIcLoraPipeline:
                 source_audio_max_duration,
             )
             if decoded_audio is not None:
-                max_samples = round(num_frames / frame_rate * decoded_audio.sampling_rate)
+                max_samples = round(
+                    num_frames / frame_rate * decoded_audio.sampling_rate
+                )
                 trimmed_waveform = decoded_audio.waveform.squeeze(0)[..., :max_samples]
-                source_audio = Audio(waveform=trimmed_waveform.detach().cpu(), sampling_rate=decoded_audio.sampling_rate)
+                source_audio = Audio(
+                    waveform=trimmed_waveform.detach().cpu(),
+                    sampling_rate=decoded_audio.sampling_rate,
+                )
 
         tiling_config = default_tiling_config()
         video, generated_audio = self._run_inference(
@@ -194,6 +294,7 @@ class LTXIcLoraPipeline:
             video_conditioning=video_conditioning,
             tiling_config=tiling_config,
             skip_stage_2=skip_stage_2,
+            progress_callback=progress_callback,
         )
         chunks = video_chunks_number(num_frames, tiling_config)
         encode_video_output(

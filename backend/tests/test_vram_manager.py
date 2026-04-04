@@ -121,9 +121,9 @@ class TestBlockSwapConfig:
         mgr = VRAMManager(torch.device("cpu"), 24)
         assert mgr.block_swap_keep_on_gpu == 5
 
-    def test_medium_tier_keeps_5_blocks(self) -> None:
+    def test_medium_tier_keeps_4_blocks(self) -> None:
         mgr = VRAMManager(torch.device("cpu"), 16)
-        assert mgr.block_swap_keep_on_gpu == 5
+        assert mgr.block_swap_keep_on_gpu == 4
 
     def test_low_tier_keeps_3_blocks(self) -> None:
         mgr = VRAMManager(torch.device("cpu"), 12)

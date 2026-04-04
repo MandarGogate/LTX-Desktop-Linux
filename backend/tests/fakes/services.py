@@ -127,7 +127,9 @@ class FakeLTXAPIClient:
         self.text_to_video_result = b"fake-ltx-api-t2v-video"
         self.image_to_video_result = b"fake-ltx-api-i2v-video"
         self.audio_to_video_result = b"fake-ltx-api-a2v-video"
-        self.retake_result = LTXRetakeResult(video_bytes=b"fake-ltx-api-retake-video", result_payload=None)
+        self.retake_result = LTXRetakeResult(
+            video_bytes=b"fake-ltx-api-retake-video", result_payload=None
+        )
         self.upload_file_results: dict[str, str] = {}
 
     def upload_file(
@@ -309,7 +311,15 @@ class FakeModelDownloader:
         on_progress: Callable[[int], None] | None = None,
     ) -> Path:
         self._raise_if_needed()
-        self.calls.append({"kind": "file", "repo_id": repo_id, "filename": filename, "local_dir": local_dir, "on_progress": on_progress})
+        self.calls.append(
+            {
+                "kind": "file",
+                "repo_id": repo_id,
+                "filename": filename,
+                "local_dir": local_dir,
+                "on_progress": on_progress,
+            }
+        )
 
         if on_progress is not None:
             on_progress(512)
@@ -366,7 +376,9 @@ class FakeCapture:
         height: int = 64,
         opened: bool = True,
     ) -> None:
-        self.frames = list(frames) if frames is not None else ["frame-0", "frame-1", "frame-2"]
+        self.frames = (
+            list(frames) if frames is not None else ["frame-0", "frame-1", "frame-2"]
+        )
         self.fps = fps
         self.width = width
         self.height = height
@@ -445,7 +457,9 @@ class FakeVideoProcessor:
         self.resize_calls.append({"frame": frame, "size": size})
         return frame
 
-    def create_writer(self, path: str, fourcc: str, fps: float, size: tuple[int, int]) -> FakeWriter:  # noqa: ARG002
+    def create_writer(
+        self, path: str, fourcc: str, fps: float, size: tuple[int, int]
+    ) -> FakeWriter:  # noqa: ARG002
         writer = FakeWriter(path, fps=fps, size=size)
         self.writers.append(writer)
         return writer
@@ -502,7 +516,15 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         lora_strength: float = 1.0,
         extra_loras: list[tuple[str, float]] | None = None,
     ) -> "FakeFastVideoPipeline":
-        del checkpoint_path, gemma_root, upsampler_path, device, lora_path, lora_strength, extra_loras
+        del (
+            checkpoint_path,
+            gemma_root,
+            upsampler_path,
+            device,
+            lora_path,
+            lora_strength,
+            extra_loras,
+        )
         pipeline = FakeFastVideoPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeFastVideoPipeline singleton is not bound")
@@ -599,8 +621,9 @@ class FakeIcLoraPipeline:
         upsampler_path: str,
         lora_path: str,
         device: str | object,
+        vram_manager: Any | None = None,
     ) -> "FakeIcLoraPipeline":
-        del checkpoint_path, gemma_root, upsampler_path, lora_path, device
+        del checkpoint_path, gemma_root, upsampler_path, lora_path, device, vram_manager
         pipeline = FakeIcLoraPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeIcLoraPipeline singleton is not bound")
@@ -787,7 +810,9 @@ class FakeTextEncoder:
     def install_patches(self, state_getter) -> None:  # noqa: ARG002
         self.install_calls += 1
 
-    def encode_via_api(self, prompt: str, api_key: str, checkpoint_path: str, enhance_prompt: bool) -> Any | None:
+    def encode_via_api(
+        self, prompt: str, api_key: str, checkpoint_path: str, enhance_prompt: bool
+    ) -> Any | None:
         self.encode_calls.append(
             {
                 "prompt": prompt,
@@ -812,11 +837,19 @@ class FakeServices:
     task_runner: FakeTaskRunner = field(default_factory=FakeTaskRunner)
     ltx_api_client: FakeLTXAPIClient = field(default_factory=FakeLTXAPIClient)
     zit_api_client: FakeZitAPIClient = field(default_factory=FakeZitAPIClient)
-    fast_video_pipeline: FakeFastVideoPipeline = field(default_factory=FakeFastVideoPipeline)
-    image_generation_pipeline: FakeImageGenerationPipeline = field(default_factory=FakeImageGenerationPipeline)
+    fast_video_pipeline: FakeFastVideoPipeline = field(
+        default_factory=FakeFastVideoPipeline
+    )
+    image_generation_pipeline: FakeImageGenerationPipeline = field(
+        default_factory=FakeImageGenerationPipeline
+    )
     ic_lora_pipeline: FakeIcLoraPipeline = field(default_factory=FakeIcLoraPipeline)
-    depth_processor_pipeline: FakeDepthProcessorPipeline = field(default_factory=FakeDepthProcessorPipeline)
-    pose_processor_pipeline: FakePoseProcessorPipeline = field(default_factory=FakePoseProcessorPipeline)
+    depth_processor_pipeline: FakeDepthProcessorPipeline = field(
+        default_factory=FakeDepthProcessorPipeline
+    )
+    pose_processor_pipeline: FakePoseProcessorPipeline = field(
+        default_factory=FakePoseProcessorPipeline
+    )
     a2v_pipeline: FakeA2VPipeline = field(default_factory=FakeA2VPipeline)
     retake_pipeline: FakeRetakePipeline = field(default_factory=FakeRetakePipeline)
 

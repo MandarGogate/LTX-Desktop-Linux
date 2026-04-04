@@ -26,6 +26,11 @@ from services.vram_manager.vram_manager import VRAMManager
 logger = logging.getLogger(__name__)
 
 
+def _is_gpu_oom_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "cuda out of memory" in message or "outofmemoryerror" in message
+
+
 class RetakeHandler(StateHandlerBase):
     def __init__(
         self,
@@ -210,12 +215,21 @@ class RetakeHandler(StateHandlerBase):
 
             self._generation.update_progress("complete", 100, 1, 1)
             self._generation.complete_generation(str(output_path))
+            self._pipelines.unload_gpu_pipeline()
             return RetakeResponse(status="complete", video_path=str(output_path))
         except HTTPError:
             self._generation.fail_generation("Retake generation failed")
+            self._pipelines.unload_gpu_pipeline()
             raise
         except Exception as exc:
             self._generation.fail_generation(str(exc))
+            if _is_gpu_oom_error(exc):
+                logger.warning(
+                    "OOM detected during retake generation, unloading GPU state for recovery"
+                )
+                self._pipelines.recover_after_oom()
+            else:
+                self._pipelines.unload_gpu_pipeline()
             if "cancelled" in str(exc).lower():
                 return RetakeResponse(status="cancelled")
             raise HTTPError(500, f"Generation error: {exc}") from exc

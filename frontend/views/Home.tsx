@@ -116,7 +116,12 @@ export function Home() {
       const project = createProject(newProjectName.trim())
       setNewProjectName('')
       setIsCreating(false)
-      openProject(project.id)
+      // Wait one frame so the new project is present in context state before
+      // switching views. Otherwise the project screen can briefly land on
+      // "Project not found" during the same React batch.
+      requestAnimationFrame(() => {
+        openProject(project.id)
+      })
     }
   }
   

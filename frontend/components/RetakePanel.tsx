@@ -1,8 +1,12 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
-import { Film, Play, Pause, Volume2, VolumeX, Loader2, Upload, Trash2, RefreshCw } from 'lucide-react'
+import { Film, Play, Pause, Volume2, VolumeX, Loader2, Upload, Trash2, RefreshCw, AudioLines, Video, Layers } from 'lucide-react'
 import { logger } from '../lib/logger'
 import { fileUrlToPath } from '../lib/url-to-path'
 import { persistDroppedFile, selectLocalFile } from '../lib/select-local-file'
+
+export type RetakeMode = 'replace_audio_and_video' | 'replace_video' | 'replace_audio'
+
+
 
 interface RetakePanelProps {
   initialVideoUrl?: string | null
@@ -14,6 +18,8 @@ interface RetakePanelProps {
   fillHeight?: boolean
   resolution?: '540p' | '720p' | '1080p'
   onResolutionChange?: (resolution: '540p' | '720p' | '1080p') => void
+  retakeMode?: RetakeMode
+
   onChange?: (data: {
     videoUrl: string | null
     videoPath: string | null
@@ -42,6 +48,8 @@ export function RetakePanel({
   fillHeight = false,
   resolution = '540p',
   onResolutionChange,
+  retakeMode = 'replace_audio_and_video',
+
   onChange,
 }: RetakePanelProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -469,27 +477,27 @@ export function RetakePanel({
               </span>
             </div>
 
-            <div className="px-4 pt-3 pb-1 flex items-start justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold text-white">Select the video part to regenerate</p>
-                <p className="text-[10px] text-zinc-500 mt-0.5">
-                  Use the prompt panel below to describe what should happen
-                </p>
+            <div className="px-4 pt-3 pb-1 flex items-center justify-between gap-3">
+              <div className="flex flex-col gap-1.5">
+                <p className="text-xs font-semibold text-white">Regenerate</p>
+                  <p className="text-[10px] text-zinc-500">Video + Audio (Default)</p>
+                </div>
+                <label className="flex items-center gap-2 text-[10px] text-zinc-500">
+                  <span>Output</span>
+                  <select
+                    value={resolution}
+                    onChange={(e) => onResolutionChange?.(e.target.value as '540p' | '720p' | '1080p')}
+                    className="bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-blue-500"
+                    disabled={isProcessing}
+                  >
+                    <option value="540p">540p</option>
+                    <option value="720p">720p</option>
+                    <option value="1080p">1080p</option>
+                  </select>
+                </label>
               </div>
-              <label className="flex items-center gap-2 text-[10px] text-zinc-500">
-                <span>Output</span>
-                <select
-                  value={resolution}
-                  onChange={(e) => onResolutionChange?.(e.target.value as '540p' | '720p' | '1080p')}
-                  className="bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-blue-500"
-                  disabled={isProcessing}
-                >
-                  <option value="540p">540p</option>
-                  <option value="720p">720p</option>
-                  <option value="1080p">1080p</option>
-                </select>
-              </label>
-            </div>
+
+
 
             <div className="px-4 pb-4">
             <div className="relative h-3 mb-0">

@@ -130,6 +130,7 @@ class RetakePipelineState:
     pipeline: RetakePipeline
     distilled: bool
     quantized: bool
+    checkpoint_path: str
 
 
 # ============================================================
