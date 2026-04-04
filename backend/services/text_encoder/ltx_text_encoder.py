@@ -351,9 +351,16 @@ class LTXTextEncoder:
                     return out
 
                 prompt_list = [prompts] if isinstance(prompts, str) else list(prompts)
+                effective_text_encoder = text_encoder
+                if effective_text_encoder is None and te_state is not None:
+                    effective_text_encoder = te_state.cached_encoder
+                if effective_text_encoder is None:
+                    raise RuntimeError(
+                        "Local text encoding requested, but no cached text encoder is available."
+                    )
                 return cast(
                     list[tuple[torch.Tensor, TensorOrNone]],
-                    original_encode_text(cast(Any, text_encoder), prompt_list, *args, **kwargs),
+                    original_encode_text(cast(Any, effective_text_encoder), prompt_list, *args, **kwargs),
                 )
 
             setattr(text_enc_module, "encode_text", patched_encode_text)

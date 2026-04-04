@@ -79,6 +79,11 @@ def test_generation_progress_resets_when_pipeline_unset(test_state):
     test_state.generation.complete_generation("/tmp/out.mp4")
     test_state.state.gpu_slot = None
 
+    # First poll after slot cleared returns the cached terminal snapshot.
+    progress = test_state.generation.get_generation_progress()
+    assert progress.status == "complete"
+
+    # Second poll: snapshot consumed, falls through to idle.
     progress = test_state.generation.get_generation_progress()
     assert progress.status == "idle"
 

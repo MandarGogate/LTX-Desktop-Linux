@@ -71,25 +71,3 @@ def test_ic_lora_1080p_profile_uses_conservative_frame_cap() -> None:
     assert max_frames == 81
 
 
-def test_ic_lora_1080p_long_chunk_uses_conservative_stage2_block_swap() -> None:
-    handler = _make_handler()
-
-    policy = handler._resolve_stage_2_block_swap_policy(
-        width=1792,
-        height=1024,
-        num_frames=81,
-    )
-
-    assert policy == (1, 1, "ic-lora-stage2-1080p-long")
-
-
-def test_ic_lora_shorter_chunk_skips_conservative_stage2_block_swap() -> None:
-    handler = _make_handler()
-
-    policy = handler._resolve_stage_2_block_swap_policy(
-        width=1792,
-        height=1024,
-        num_frames=57,
-    )
-
-    assert policy is None

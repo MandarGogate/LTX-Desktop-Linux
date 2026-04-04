@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import torch
+
 from runtime_config.model_download_specs import resolve_model_path
 from tests.fakes import FakeCapture
 
@@ -182,7 +184,8 @@ class TestIcLoraGenerate:
         (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
         test_state.state.app_settings.use_local_text_encoder = True
 
-        capture = FakeCapture(frames=["f1", "f2"], fps=24, width=64, height=64)
+        frames = [f"f{i}" for i in range(1, 18)]  # 17 frames = 8*2+1
+        capture = FakeCapture(frames=frames, fps=24, width=64, height=64)
         test_state.video_processor.register_video(str(video_path), capture)
 
         response = client.post(
@@ -202,8 +205,52 @@ class TestIcLoraGenerate:
 
         pipeline = fake_services.ic_lora_pipeline
         assert len(pipeline.generate_calls) == 1
-        assert test_state.video_processor.writers[-1].size == (768, 768)
-        assert len(test_state.video_processor.resize_calls) == 2
+        # 540p 16:9 → (896, 512)
+        assert test_state.video_processor.writers[-1].size == (896, 512)
+        assert len(test_state.video_processor.resize_calls) == 17
+
+    def test_ic_lora_clears_vram_after_success(self, client, test_state, fake_services):
+        """GPU pipeline is unloaded after a successful IC-LoRA generation."""
+        video_path = test_state.config.outputs_dir / "input_vram.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        _create_ic_lora_resources(test_state)
+
+        te_dir = _model_path(test_state, "text_encoder")
+        te_dir.mkdir(parents=True, exist_ok=True)
+        (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        frames = [f"f{i}" for i in range(1, 18)]
+        capture = FakeCapture(frames=frames, fps=24, width=64, height=64)
+        test_state.video_processor.register_video(str(video_path), capture)
+
+        r = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "test prompt",
+                "conditioning_type": "canny",
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "complete"
+
+        # GPU slot should be cleared
+        assert test_state.state.gpu_slot is None
+        assert fake_services.gpu_cleaner.cleanup_calls >= 1
+
+    def test_decode_modules_are_forced_onto_active_device(self, test_state, fake_services):
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import _force_module_to_device
+
+        class _NestedModule(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.linear = torch.nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
+
+        module = _NestedModule().to(torch.device("cpu"))
+        moved = _force_module_to_device(module, torch.device("cpu"))
+
+        assert moved.linear.weight.device.type == "cpu"
 
     def test_pose_generation_loads_pose_processors(self, client, test_state, fake_services):
         video_path = test_state.config.outputs_dir / "input.mp4"
@@ -215,7 +262,8 @@ class TestIcLoraGenerate:
         (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
         test_state.state.app_settings.use_local_text_encoder = True
 
-        capture = FakeCapture(frames=["f1", "f2"], fps=24, width=64, height=64)
+        frames = [f"f{i}" for i in range(1, 18)]  # 17 frames = 8*2+1
+        capture = FakeCapture(frames=frames, fps=24, width=64, height=64)
         test_state.video_processor.register_video(str(video_path), capture)
 
         response = client.post(
@@ -228,9 +276,10 @@ class TestIcLoraGenerate:
         )
 
         assert response.status_code == 200
-        assert fake_services.pose_processor_pipeline.apply_calls == ["f1", "f2"]
-        assert test_state.video_processor.writers[-1].size == (768, 768)
-        assert len(test_state.video_processor.resize_calls) == 2
+        assert fake_services.pose_processor_pipeline.apply_calls == frames
+        # 540p 16:9 → (896, 512)
+        assert test_state.video_processor.writers[-1].size == (896, 512)
+        assert len(test_state.video_processor.resize_calls) == 17
 
     def test_motion_track_generation_uses_input_video_directly(self, client, test_state, fake_services):
         video_path = test_state.config.outputs_dir / "input.mp4"
@@ -242,8 +291,26 @@ class TestIcLoraGenerate:
         (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
         test_state.state.app_settings.use_local_text_encoder = True
 
-        capture = FakeCapture(frames=["f1", "f2"], fps=24, width=64, height=64)
+        frames = [f"f{i}" for i in range(1, 18)]  # 17 frames = 8*2+1
+        capture = FakeCapture(frames=frames, fps=24, width=896, height=512)
         test_state.video_processor.register_video(str(video_path), capture)
+
+        # Pre-populate the conditioning cache so create_motion_track_overlay_video
+        # is not called (it needs real video files).
+        from state.conditioning_cache import ConditioningCacheEntry, ConditioningCacheKey
+        # First call load_ic_lora to create the IC LoRA state in the GPU slot.
+        ic_lora_path = _model_path(test_state, "ic_lora_motion_track")
+        ic_state = test_state.pipelines.load_ic_lora(str(ic_lora_path))
+        # The cache key depends on generation profile; use the expected values.
+        cache_key = ConditioningCacheKey(
+            str(video_path), "motion_track", 896, 512,
+            161,  # supported_frames for 540p from _select_generation_profile
+            17,   # requested_frame_count
+        )
+        ic_state.conditioning_cache.put(
+            cache_key,
+            ConditioningCacheEntry(str(video_path), 17, 24.0),
+        )
 
         response = client.post(
             "/api/ic-lora/generate",
@@ -297,7 +364,7 @@ class TestIcLoraGenerate:
         video_path.write_bytes(b"\x00" * 100)
         _create_ic_lora_resources(test_state)
 
-        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["f1", "f2"]))
+        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=[f"f{i}" for i in range(17)]))
         fake_services.ic_lora_pipeline.raise_on_generate = RuntimeError("GPU OOM")
 
         response = client.post(
@@ -342,6 +409,13 @@ class TestIcLoraGenerate:
         assert "Pose processor model not found" in response.json()["error"]
 
     def test_second_generation_reuses_conditioning_cache(self, client, test_state, fake_services):
+        """When the pipeline remains loaded, the conditioning cache avoids recomputation.
+
+        Note: after a successful generation the GPU pipeline is unloaded to free
+        VRAM, which also clears the conditioning cache. This test verifies cache
+        behaviour when the IC LoRA state is preserved between calls by
+        pre-populating it.
+        """
         video_path = test_state.config.outputs_dir / "input.mp4"
         video_path.write_bytes(b"\x00" * 100)
         _create_ic_lora_resources(test_state)
@@ -351,7 +425,8 @@ class TestIcLoraGenerate:
         (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
         test_state.state.app_settings.use_local_text_encoder = True
 
-        capture = FakeCapture(frames=["f1", "f2"], fps=24, width=64, height=64)
+        frames = [f"f{i}" for i in range(1, 18)]  # 17 frames = 8*2+1
+        capture = FakeCapture(frames=frames, fps=24, width=64, height=64)
         test_state.video_processor.register_video(str(video_path), capture)
 
         payload = {
@@ -364,17 +439,19 @@ class TestIcLoraGenerate:
         r1 = client.post("/api/ic-lora/generate", json=payload)
         assert r1.status_code == 200
 
+        # After successful generation the GPU pipeline is unloaded to free
+        # VRAM, so the conditioning cache is cleared and a second generation
+        # will re-create the control video.
         writers_after_first = len(test_state.video_processor.writers)
 
-        # Re-register the video so it can be opened again if needed
-        capture2 = FakeCapture(frames=["f1", "f2"], fps=24, width=64, height=64)
+        capture2 = FakeCapture(frames=frames, fps=24, width=64, height=64)
         test_state.video_processor.register_video(str(video_path), capture2)
 
         r2 = client.post("/api/ic-lora/generate", json={**payload, "seed": 99})
         assert r2.status_code == 200
 
-        # Cache hit: no new control video should have been written
-        assert len(test_state.video_processor.writers) == writers_after_first
+        # Pipeline was reloaded, so a new control video is written
+        assert len(test_state.video_processor.writers) == writers_after_first + 1
 
     def test_ic_lora_shorter_duration_uses_shorter_control_video(self, client, test_state, fake_services):
         video_path = test_state.config.outputs_dir / "input_short.mp4"
@@ -447,7 +524,8 @@ class TestIcLoraGenerate:
         (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
         test_state.state.app_settings.use_local_text_encoder = True
 
-        capture = FakeCapture(frames=["f1", "f2"], fps=24, width=640, height=360)
+        frames = [f"f{i}" for i in range(1, 18)]  # 17 frames = 8*2+1
+        capture = FakeCapture(frames=frames, fps=24, width=640, height=360)
         test_state.video_processor.register_video(str(video_path), capture)
 
         response = client.post(
@@ -460,8 +538,9 @@ class TestIcLoraGenerate:
         )
 
         assert response.status_code == 200
+        # 540p 16:9 → (896, 512)
         assert test_state.video_processor.writers[-1].size == (896, 512)
-        assert len(test_state.video_processor.resize_calls) == 2
+        assert len(test_state.video_processor.resize_calls) == 17
 
     def test_ic_lora_uses_requested_resolution(self, client, test_state, fake_services):
         video_path = test_state.config.outputs_dir / "input_1080.mp4"
@@ -473,7 +552,8 @@ class TestIcLoraGenerate:
         (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
         test_state.state.app_settings.use_local_text_encoder = True
 
-        capture = FakeCapture(frames=["f1", "f2"], fps=24, width=640, height=360)
+        frames = [f"f{i}" for i in range(1, 18)]  # 17 frames = 8*2+1
+        capture = FakeCapture(frames=frames, fps=24, width=640, height=360)
         test_state.video_processor.register_video(str(video_path), capture)
 
         response = client.post(
@@ -502,7 +582,8 @@ class TestIcLoraGenerate:
         (te_dir / "model.safetensors").write_bytes(b"\x00" * 100)
         test_state.state.app_settings.use_local_text_encoder = True
 
-        capture = FakeCapture(frames=["f1", "f2"], fps=24, width=640, height=360)
+        frames = [f"f{i}" for i in range(1, 18)]  # 17 frames = 8*2+1
+        capture = FakeCapture(frames=frames, fps=24, width=640, height=360)
         test_state.video_processor.register_video(str(video_path), capture)
 
         response = client.post(

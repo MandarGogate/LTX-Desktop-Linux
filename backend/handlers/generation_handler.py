@@ -289,6 +289,16 @@ class GenerationHandler(StateHandlerBase):
 
         gen = self._generation_for_polling()
 
+        # If the GPU/API slots have been cleared (e.g. after unload_gpu_pipeline
+        # following a successful generation), the live snapshot may still hold
+        # the terminal state. Return it once, then consume it so subsequent
+        # polls fall through to "idle".
+        if gen is None and self._live_progress_snapshot is not None:
+            if self._live_progress_snapshot.status in ("error", "complete", "cancelled"):
+                snapshot = self._live_progress_snapshot
+                self._live_progress_snapshot = None
+                return snapshot
+
         match gen:
             case GenerationRunning(progress=progress):
                 return GenerationProgressResponse(

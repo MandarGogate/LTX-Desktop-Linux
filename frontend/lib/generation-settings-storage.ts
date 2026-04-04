@@ -6,6 +6,7 @@ function isGenerationSettings(value: unknown): value is GenerationSettings {
   const record = value as Record<string, unknown>
   return (
     typeof record.model === 'string' &&
+    (record.advancedMode === undefined || typeof record.advancedMode === 'string') &&
     typeof record.duration === 'number' &&
     typeof record.videoResolution === 'string' &&
     typeof record.fps === 'number' &&
@@ -34,7 +35,7 @@ export function normalizeVideoSettingsForCurrentBackend(
   options: { forceApiVideo: boolean },
 ): GenerationSettings {
   if (options.forceApiVideo) {
-    return sanitizeForcedApiVideoSettings(settings)
+    return { ...sanitizeForcedApiVideoSettings(settings), advancedMode: 'standard' }
   }
 
   if (settings.model === 'quality') {
@@ -45,7 +46,7 @@ export function normalizeVideoSettingsForCurrentBackend(
     return { ...settings, model: 'fast' }
   }
 
-  return settings
+  return { ...settings, advancedMode: settings.advancedMode || 'standard' }
 }
 
 export function saveGenerationSettings(key: string, settings: GenerationSettings): void {

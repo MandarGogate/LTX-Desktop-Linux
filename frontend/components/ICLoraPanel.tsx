@@ -9,8 +9,8 @@ import { fileUrlToPath } from '../lib/url-to-path'
 import { persistDroppedFile, selectLocalFile } from '../lib/select-local-file'
 import { Select } from './ui/select'
 
-export type ICLoraModelType = 'union' | 'motion_track'
-export type ICLoraConditioningType = 'canny' | 'depth' | 'pose' | 'motion_track'
+export type ICLoraModelType = 'union'
+export type ICLoraConditioningType = 'canny' | 'depth' | 'pose'
 
 type DownloadStatus = 'idle' | 'downloading' | 'complete' | 'error'
 
@@ -81,28 +81,23 @@ interface ICLoraPanelProps {
 
 export const IC_LORA_MODEL_TYPES: { value: ICLoraModelType; label: string; desc: string }[] = [
   { value: 'union', label: 'Union Control', desc: 'Canny, depth, or pose guidance' },
-  { value: 'motion_track', label: 'Motion Track', desc: 'Video with colored spline / trajectory overlays' },
 ]
 
 export const CONDITIONING_TYPES: { value: ICLoraConditioningType; label: string; desc: string }[] = [
   { value: 'canny', label: 'Canny Edges', desc: 'Edge detection' },
   { value: 'depth', label: 'Depth Map', desc: 'Estimated depth' },
   { value: 'pose', label: 'Pose', desc: 'OpenPose-style skeleton guidance' },
-  { value: 'motion_track', label: 'Motion Track', desc: 'Trajectory overlay control video' },
 ]
 
-export function getConditioningTypesForModel(modelType: ICLoraModelType) {
-  return modelType === 'motion_track'
-    ? CONDITIONING_TYPES.filter(ct => ct.value === 'motion_track')
-    : CONDITIONING_TYPES.filter(ct => ct.value !== 'motion_track')
+export function getConditioningTypesForModel(_modelType: ICLoraModelType) {
+  return CONDITIONING_TYPES
 }
 
-const IC_LORA_MODEL_IDS = ['ic_lora', 'ic_lora_motion_track', 'depth_processor', 'person_detector', 'pose_processor'] as const
+const IC_LORA_MODEL_IDS = ['ic_lora', 'depth_processor', 'person_detector', 'pose_processor'] as const
 type IcLoraModelId = typeof IC_LORA_MODEL_IDS[number]
 
 const IC_LORA_MODEL_LABELS: Record<IcLoraModelId, string> = {
   ic_lora: 'IC-LoRA Union Control',
-  ic_lora_motion_track: 'IC-LoRA Motion Track',
   depth_processor: 'Depth Processor',
   person_detector: 'Person Detector',
   pose_processor: 'Pose Processor',
@@ -110,7 +105,6 @@ const IC_LORA_MODEL_LABELS: Record<IcLoraModelId, string> = {
 
 const EMPTY_IC_MODEL_STATUS: Record<IcLoraModelId, boolean> = {
   ic_lora: false,
-  ic_lora_motion_track: false,
   depth_processor: false,
   person_detector: false,
   pose_processor: false,
@@ -166,13 +160,11 @@ export function ICLoraPanel({
   const [downloadSessionId, setDownloadSessionId] = useState<string | null>(null)
   const [extractError, setExtractError] = useState<string | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
-  const requiredModelIds: IcLoraModelId[] = modelType === 'motion_track'
-    ? ['ic_lora_motion_track']
-    : conditioningType === 'depth'
-      ? ['ic_lora', 'depth_processor']
-      : conditioningType === 'pose'
-        ? ['ic_lora', 'person_detector', 'pose_processor']
-        : ['ic_lora']
+  const requiredModelIds: IcLoraModelId[] = conditioningType === 'depth'
+    ? ['ic_lora', 'depth_processor']
+    : conditioningType === 'pose'
+      ? ['ic_lora', 'person_detector', 'pose_processor']
+      : ['ic_lora']
   const requiredModelIdsKey = requiredModelIds.join('|')
   const icLoraReady = requiredModelIds.every(id => icModelDownloaded[id])
 
@@ -616,11 +608,6 @@ export function ICLoraPanel({
                     <Film className="h-6 w-6 text-zinc-600" />
                   </div>
                   <p className="text-zinc-400 text-xs">Drop or import a control video</p>
-                  {modelType === 'motion_track' && (
-                    <p className="text-[10px] text-zinc-500 mt-2 max-w-[220px] mx-auto">
-                      Motion Track expects a trajectory-overlay video, not a plain reference clip.
-                    </p>
-                  )}
                   <button
                     onClick={handleBrowse}
                     className="mt-2 px-3 py-1.5 text-[10px] text-blue-400 border border-blue-500/30 rounded-lg hover:bg-blue-600/10 transition-colors"

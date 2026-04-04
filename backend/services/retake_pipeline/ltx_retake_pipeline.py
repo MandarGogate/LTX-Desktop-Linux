@@ -357,6 +357,7 @@ class LTXRetakePipeline:
 
         # --- Text encoding ---
         text_encoder = self.model_ledger.text_encoder()
+        text_encoder.to(self.device)
 
         v_context_n: torch.Tensor | None = None
         a_context_n: torch.Tensor | None = None

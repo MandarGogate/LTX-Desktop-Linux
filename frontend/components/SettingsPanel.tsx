@@ -9,6 +9,7 @@ import {
 
 export interface GenerationSettings {
   model: 'fast' | 'balanced' | 'quality' | 'custom' | 'pro'
+  advancedMode?: 'standard' | 'experimental_three_stage_sampling'
   duration: number
   videoResolution: string
   fps: number
@@ -107,6 +108,32 @@ export function SettingsPanel({
   // Video mode settings
   return (
     <div className="space-y-4">
+      {!forceApiGenerations && (
+        <>
+          <Select
+            label="Generation Mode"
+            badge="EXPERIMENTAL"
+            value={settings.advancedMode || 'standard'}
+            onChange={(e) => handleChange('advancedMode', e.target.value as 'standard' | 'experimental_three_stage_sampling')}
+            disabled={disabled}
+          >
+            <option value="standard">Standard</option>
+            <option value="experimental_three_stage_sampling">Three Stage Sampling</option>
+          </Select>
+
+          {settings.advancedMode === 'experimental_three_stage_sampling' && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100 space-y-1">
+              <div className="font-semibold">Experimental advanced mode</div>
+              <div>
+                This first implementation installs a standalone workflow asset and enables an opt-in request mode.
+                It currently targets image-to-video only and is intentionally gated server-side until the dedicated
+                executor is wired in.
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
       {/* Model Selection */}
       {!forceApiGenerations ? (
         <Select

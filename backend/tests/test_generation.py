@@ -113,6 +113,43 @@ class TestGenerate:
         pipeline = fake_services.fast_video_pipeline
         assert len(pipeline.generate_calls) == 1
 
+    def test_t2v_clears_vram_after_success(self, client, test_state, fake_services, create_fake_model_files):
+        """GPU pipeline is unloaded after a successful T2V generation."""
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post("/api/generate", json=_T2V_JSON)
+        assert r.status_code == 200
+        assert r.json()["status"] == "complete"
+
+        # The GPU slot should have been cleared
+        assert test_state.state.gpu_slot is None
+        # GPU cleaner should have been invoked
+        assert fake_services.gpu_cleaner.cleanup_calls >= 1
+
+    def test_a2v_clears_vram_after_success(self, client, test_state, fake_services, create_fake_model_files, tmp_path):
+        """GPU pipeline is unloaded after a successful A2V generation."""
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+        _configure_a2v_fast_distilled_inputs(test_state)
+
+        audio = tmp_path / "audio.wav"
+        _write_test_wav(audio, duration_seconds=2.0)
+
+        r = client.post(
+            "/api/generate",
+            json={
+                **_T2V_JSON,
+                "audioPath": str(audio),
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "complete"
+
+        # The GPU slot should have been cleared
+        assert test_state.state.gpu_slot is None
+        assert fake_services.gpu_cleaner.cleanup_calls >= 1
+
     def test_already_running(self, client, test_state):
         _fake_running_generation_state(test_state)
 
@@ -190,6 +227,40 @@ class TestGenerate:
 
         pipeline = fake_services.fast_video_pipeline
         assert pipeline.generate_calls[0]["negative_prompt"] == "low quality, artifacts"
+
+    def test_experimental_three_stage_requires_image(self, client, test_state, create_fake_model_files):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "advancedMode": "experimental_three_stage_sampling"},
+        )
+
+        assert r.status_code == 400
+        assert "requires an input image" in r.json()["error"]
+
+    def test_experimental_three_stage_rejects_until_executor_is_wired(
+        self, client, test_state, create_fake_model_files, tmp_path
+    ):
+        from PIL import Image
+
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+        image_path = tmp_path / "input.png"
+        Image.new("RGB", (64, 64), "white").save(image_path)
+
+        r = client.post(
+            "/api/generate",
+            json={
+                **_T2V_JSON,
+                "advancedMode": "experimental_three_stage_sampling",
+                "imagePath": str(image_path),
+            },
+        )
+
+        assert r.status_code == 400
+        assert "standalone workflow asset" in r.json()["error"]
 
     def test_error_sets_generation_error(self, client, test_state, fake_services, create_fake_model_files):
         create_fake_model_files()

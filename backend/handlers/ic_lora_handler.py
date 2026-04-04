@@ -35,7 +35,6 @@ from services.services_utils import FrameArray
 from services.vram_manager.vram_manager import VRAMManager
 from server_utils.ltx_video_normalization import (
     concat_videos,
-    downsample_video_temporally_for_ltx,
     extract_video_frame_range,
     extract_video_frame_to_image,
     mux_video_with_audio,
@@ -119,17 +118,6 @@ def _ic_lora_inference_progress(
 
 
 class IcLoraHandler(StateHandlerBase):
-    @staticmethod
-    def _resolve_stage_2_block_swap_policy(
-        *,
-        width: int,
-        height: int,
-        num_frames: int,
-    ) -> tuple[int, int, str] | None:
-        if max(width, height) >= 1792 and num_frames > 57:
-            return (1, 1, "ic-lora-stage2-1080p-long")
-        return None
-
     def __init__(
         self,
         state: AppState,
@@ -330,32 +318,9 @@ class IcLoraHandler(StateHandlerBase):
         source_audio_max_duration: float | None = None,
         progress_callback: Any = None,
     ) -> None:
-        stage_2_policy = self._resolve_stage_2_block_swap_policy(
-            width=width,
-            height=height,
-            num_frames=num_frames,
-        )
-
-        def _configure_stage_2_policy(for_skip_stage_2: bool) -> None:
-            clear_policy = getattr(ic_state.pipeline, "clear_generation_stage_2_block_swap_policy", None)
-            if for_skip_stage_2 or stage_2_policy is None:
-                if callable(clear_policy):
-                    clear_policy()
-                return
-
-            set_policy = getattr(ic_state.pipeline, "set_generation_stage_2_block_swap_policy", None)
-            if callable(set_policy):
-                blocks_to_keep_on_gpu, prefetch_distance, reason = stage_2_policy
-                set_policy(
-                    blocks_to_keep_on_gpu=blocks_to_keep_on_gpu,
-                    prefetch_distance=prefetch_distance,
-                    reason=reason,
-                )
-
         skip_stage_2 = False
         should_retry_low_vram = False
         try:
-            _configure_stage_2_policy(skip_stage_2)
             ic_state.pipeline.generate(
                 prompt=prompt,
                 seed=seed,
@@ -400,7 +365,6 @@ class IcLoraHandler(StateHandlerBase):
                 except Exception:
                     logger.debug("[ic-lora] torch.cuda.ipc_collect failed", exc_info=True)
 
-        _configure_stage_2_policy(skip_stage_2)
         ic_state.pipeline.generate(
             prompt=prompt,
             seed=seed,
@@ -450,6 +414,16 @@ class IcLoraHandler(StateHandlerBase):
 
             t_text_start = time.perf_counter()
             self._text.prepare_text_encoding(req.prompt, enhance_prompt=False)
+            # IC-LoRA later calls encode_text(None, ...), expecting the global
+            # text-encoder patch to serve a cached local encoder. Prime that
+            # cache now by forcing the pipeline's stage-1 model ledger to build
+            # its text encoder once.
+            stage_1_model_ledger = getattr(getattr(ic_state.pipeline, "pipeline", None), "stage_1_model_ledger", None)
+            if stage_1_model_ledger is not None and hasattr(stage_1_model_ledger, "text_encoder"):
+                try:
+                    stage_1_model_ledger.text_encoder()
+                except Exception:
+                    logger.debug("[ic-lora] Failed to prewarm cached text encoder", exc_info=True)
             t_text_end = time.perf_counter()
             logger.info("[ic-lora] Text encoding (local): %.2fs", t_text_end - t_text_start)
 
@@ -519,7 +493,12 @@ class IcLoraHandler(StateHandlerBase):
             else:
                 t_preprocess_start = time.perf_counter()
 
-                frame_count = requested_frame_count
+                # Snap frame count to 8k+1 before writing the control video
+                # so no post-hoc normalization is needed.
+                frame_count = snap_frames_to_8k_plus_1(requested_frame_count)
+                if frame_count < 9:
+                    frame_count = 9
+                frame_count = min(frame_count, requested_frame_count)
                 fps = source_fps
 
                 control_video_path = str(
@@ -547,6 +526,8 @@ class IcLoraHandler(StateHandlerBase):
                         preprocess_progress = 10 + math.floor((frame_idx / frame_count) * 35)
                         self._generation.update_progress("preprocessing", preprocess_progress, frame_idx, frame_count)
 
+                # Update frame_count to what was actually written
+                frame_count = frame_idx
                 self._video_processor.release(cap)
                 self._video_processor.release(writer)
                 t_preprocess_end = time.perf_counter()
@@ -560,27 +541,6 @@ class IcLoraHandler(StateHandlerBase):
                 )
 
             use_chunked_generation = frame_count > supported_frames and fps > 0
-            if not use_chunked_generation and ((frame_count - 1) % 8 != 0):
-                normalized = downsample_video_temporally_for_ltx(
-                    video_path=control_video_path,
-                    output_dir=self.config.outputs_dir / "_normalized_inputs",
-                    target_max_frames=supported_frames,
-                )
-                control_video_path = normalized.path
-                frame_count = normalized.normalized_frames
-                fps = normalized.fps
-                logger.info(
-                    "[ic-lora] Low-VRAM control normalization %s -> %s (frames %d->%d fps %.2f->%.2f)",
-                    video_path,
-                    control_video_path,
-                    normalized.original_frames,
-                    normalized.normalized_frames,
-                    source_fps,
-                    fps,
-                )
-                ic_state.conditioning_cache.put(
-                    cache_key, ConditioningCacheEntry(control_video_path, frame_count, fps)
-                )
 
             images: list[ImageConditioningInput] = [
                 ImageConditioningInput(path=img.path, frame_idx=int(img.frame), strength=float(img.strength))

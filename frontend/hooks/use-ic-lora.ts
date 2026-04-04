@@ -3,8 +3,8 @@ import { backendFetch } from '../lib/backend'
 import { logger } from '../lib/logger'
 import { toServableUrl } from '../lib/serve-url'
 
-export type IcLoraConditioningType = 'canny' | 'depth' | 'pose' | 'motion_track'
-export type IcLoraModelType = 'union' | 'motion_track'
+export type IcLoraConditioningType = 'canny' | 'depth' | 'pose'
+export type IcLoraModelType = 'union'
 
 export interface IcLoraSubmitParams {
   videoPath: string

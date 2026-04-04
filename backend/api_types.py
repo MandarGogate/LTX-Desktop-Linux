@@ -230,6 +230,7 @@ class GenerateVideoRequest(BaseModel):
     prompt: NonEmptyPrompt
     resolution: str = "512p"
     model: str = "fast"
+    advancedMode: Literal["standard", "experimental_three_stage_sampling"] = "standard"
     cameraMotion: VideoCameraMotion = "none"
     negativePrompt: str = ""
     duration: str = "2"

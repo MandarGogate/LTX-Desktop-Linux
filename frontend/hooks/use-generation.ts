@@ -137,6 +137,7 @@ export function useGeneration(): UseGenerationReturn {
       const body: Record<string, unknown> = {
         prompt,
         model: settings.model,
+        advancedMode: settings.advancedMode || 'standard',
         duration: String(settings.duration),
         resolution: settings.videoResolution,
         fps: String(settings.fps),

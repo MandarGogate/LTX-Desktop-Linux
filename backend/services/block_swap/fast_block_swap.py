@@ -55,9 +55,11 @@ class FastBlockSwapWrapper:
         # CUDA streams
         self._transfer_stream: torch.cuda.Stream | None = None
         self._offload_stream: torch.cuda.Stream | None = None
+        self._compute_stream: torch.cuda.Stream | None = None
         if device.type == "cuda":
             self._transfer_stream = _torch.cuda.Stream(device=device)
             self._offload_stream = _torch.cuda.Stream(device=device)
+            self._compute_stream = _torch.cuda.current_stream(device=device)
 
         self._setup_blocks()
 
@@ -225,6 +227,8 @@ class FastBlockSwapWrapper:
             if idx in self._gpu_block_indices and idx >= self.blocks_to_keep_on_gpu:
                 block = self._blocks[idx]
                 if self._offload_stream is not None:
+                    current_stream = self._torch.cuda.current_stream(device=self.device)
+                    self._offload_stream.wait_stream(current_stream)
                     with self._torch.cuda.stream(self._offload_stream):
                         block.to(self.cpu_device, non_blocking=True)
                 else:
@@ -240,6 +244,8 @@ class FastBlockSwapWrapper:
         for i, block in enumerate(self._blocks):
             if i in self._gpu_block_indices:
                 if self._offload_stream is not None:
+                    current_stream = self._torch.cuda.current_stream(device=self.device)
+                    self._offload_stream.wait_stream(current_stream)
                     with self._torch.cuda.stream(self._offload_stream):
                         block.to(self.cpu_device, non_blocking=True)
                 else:

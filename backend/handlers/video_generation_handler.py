@@ -87,6 +87,23 @@ class VideoGenerationHandler(StateHandlerBase):
         duration = float(req.duration)
         fps = int(float(req.fps))
 
+        if req.advancedMode == "experimental_three_stage_sampling":
+            image_path = normalize_optional_path(req.imagePath)
+            if image_path is None:
+                raise HTTPError(
+                    400,
+                    "Experimental Three Stage Sampling currently requires an input image.",
+                )
+            if req.audioPath:
+                raise HTTPError(
+                    400,
+                    "Experimental Three Stage Sampling does not support audio-to-video yet.",
+                )
+            raise HTTPError(
+                400,
+                "Experimental Three Stage Sampling has been added as a standalone workflow asset, but the dedicated in-app executor is not wired yet.",
+            )
+
         audio_path = normalize_optional_path(req.audioPath)
         if audio_path:
             return self._generate_a2v(req, duration, fps, audio_path=audio_path)
@@ -164,6 +181,7 @@ class VideoGenerationHandler(StateHandlerBase):
             )
 
             self._generation.complete_generation(output_path)
+            self._pipelines.unload_gpu_pipeline()
             return GenerateVideoResponse(status="complete", video_path=output_path)
 
         except Exception as e:
@@ -430,6 +448,7 @@ class VideoGenerationHandler(StateHandlerBase):
 
             self._generation.update_progress("complete", 100, total_steps, total_steps)
             self._generation.complete_generation(str(output_path))
+            self._pipelines.unload_gpu_pipeline()
             return GenerateVideoResponse(status="complete", video_path=str(output_path))
 
         except Exception as e:

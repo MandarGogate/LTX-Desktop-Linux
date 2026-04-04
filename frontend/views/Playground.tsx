@@ -32,6 +32,7 @@ const PLAYGROUND_SETTINGS_STORAGE_KEY = 'ltx_playground_generation_settings'
 
 const DEFAULT_SETTINGS: GenerationSettings = {
   model: 'fast',
+  advancedMode: 'standard',
   duration: 5,
   videoResolution: '540p',
   fps: 24,
@@ -131,7 +132,6 @@ export function Playground() {
     videoDuration: 0,
     ready: false,
   })
-  const [retakeMode, setRetakeMode] = useState<'replace_audio_and_video' | 'replace_video' | 'replace_audio'>('replace_audio_and_video')
   const [retakePanelKey, setRetakePanelKey] = useState(0)
   const [icLoraInput, setIcLoraInput] = useState({
     videoUrl: null as string | null,
@@ -184,7 +184,7 @@ export function Playground() {
         startTime: retakeInput.startTime,
         duration: retakeInput.duration,
         prompt,
-        mode: retakeMode,
+        mode: 'replace_audio_and_video' as const,
         resolution: settings.videoResolution as '540p' | '720p' | '1080p',
       })
       return
@@ -331,8 +331,6 @@ export function Playground() {
                 processingStatus={retakeStatus}
                 resolution={settings.videoResolution as '540p' | '720p' | '1080p'}
                 onResolutionChange={(resolution) => setSettings(prev => ({ ...prev, videoResolution: resolution }))}
-                retakeMode={retakeMode}
-                  onRetakeModeChange={setRetakeMode}
                 onChange={(data) => setRetakeInput(data)}
               />
             )}

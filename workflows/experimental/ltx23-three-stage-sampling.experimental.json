@@ -1,0 +1,101 @@
+{
+  "name": "LTX 2.3 Three Stage Sampling (Experimental)",
+  "description": "Experimental advanced image-to-video workflow asset for LTX 2.3 using low-resolution generation followed by two latent upscales and two refinement passes.",
+  "mode": "image-to-video",
+  "engine": "comfyui",
+  "syntax_version": "0.4",
+  "status": "experimental",
+  "entrypoint": {
+    "type": "comfy_workflow_json",
+    "file": "ltx23-three-stage-sampling.experimental.json"
+  },
+  "workflow": {
+    "last_link_id": 904,
+    "last_node_id": 454,
+    "version": 0.4,
+    "revision": 0,
+    "config": {},
+    "id": "07824bbb-6672-4bb0-ac36-4313a519e35b",
+    "nodes": [
+      {
+        "id": 301,
+        "type": "PrimitiveInt",
+        "title": "Length",
+        "pos": [-3763.860107421875, 4785.1669921875],
+        "size": [360, 82],
+        "mode": 0,
+        "order": 3,
+        "inputs": [{ "name": "value", "label": "value", "type": "INT", "localized_name": "value", "widget": { "name": "value" } }],
+        "outputs": [{ "name": "INT", "links": [685], "label": "INT", "type": "INT", "localized_name": "INT" }],
+        "widgets_values": [121, "fixed"],
+        "flags": {},
+        "properties": { "cnr_id": "comfy-core", "hasSecondTab": false, "ver": "0.7.0", "widget_ue_connectable": {}, "secondTabText": "Send Back", "enableTabs": false, "secondTabOffset": 80, "Node name for S&R": "PrimitiveInt", "tabWidth": 65, "secondTabWidth": 65, "tabXOffset": 10 }
+      },
+      {
+        "id": 300,
+        "type": "PrimitiveInt",
+        "title": "Frame Rate",
+        "pos": [-3763.860107421875, 5235.16748046875],
+        "size": [360, 82],
+        "mode": 0,
+        "order": 4,
+        "inputs": [{ "name": "value", "label": "value", "type": "INT", "localized_name": "value", "widget": { "name": "value" } }],
+        "outputs": [{ "name": "INT", "links": [688], "label": "INT", "type": "INT", "localized_name": "INT" }],
+        "widgets_values": [24, "fixed"],
+        "flags": {},
+        "properties": { "cnr_id": "comfy-core", "hasSecondTab": false, "ver": "0.16.3", "widget_ue_connectable": {}, "secondTabText": "Send Back", "enableTabs": false, "secondTabOffset": 80, "Node name for S&R": "PrimitiveInt", "tabWidth": 65, "secondTabWidth": 65, "tabXOffset": 10 }
+      },
+      {
+        "id": 314,
+        "type": "PrimitiveInt",
+        "title": "Width",
+        "pos": [-3763.860107421875, 4935.16748046875],
+        "size": [360, 82],
+        "mode": 0,
+        "order": 48,
+        "inputs": [{ "name": "value", "label": "value", "type": "INT", "localized_name": "value", "widget": { "name": "value" } }],
+        "outputs": [{ "name": "INT", "links": [686], "label": "INT", "type": "INT", "localized_name": "INT" }],
+        "widgets_values": [360, "fixed"],
+        "flags": {},
+        "properties": { "cnr_id": "comfy-core", "hasSecondTab": false, "ver": "0.16.3", "widget_ue_connectable": {}, "secondTabText": "Send Back", "enableTabs": false, "secondTabOffset": 80, "Node name for S&R": "PrimitiveInt", "tabWidth": 65, "secondTabWidth": 65, "tabXOffset": 10 }
+      },
+      {
+        "id": 299,
+        "type": "PrimitiveInt",
+        "title": "Height",
+        "pos": [-3763.860107421875, 5085.16796875],
+        "size": [360, 82],
+        "mode": 0,
+        "order": 49,
+        "inputs": [{ "name": "value", "label": "value", "type": "INT", "localized_name": "value", "widget": { "name": "value" } }],
+        "outputs": [{ "name": "INT", "links": [687], "label": "INT", "type": "INT", "localized_name": "INT" }],
+        "widgets_values": [640, "fixed"],
+        "flags": {},
+        "properties": { "cnr_id": "comfy-core", "hasSecondTab": false, "ver": "0.16.3", "widget_ue_connectable": {}, "secondTabText": "Send Back", "enableTabs": false, "secondTabOffset": 80, "Node name for S&R": "PrimitiveInt", "tabWidth": 65, "secondTabWidth": 65, "tabXOffset": 10 }
+      },
+      {
+        "id": 303,
+        "type": "PrimitiveStringMultiline",
+        "title": "Prompt",
+        "pos": [-4592.9658203125, 4760.6337890625],
+        "size": [766.56005859375, 1029.751220703125],
+        "mode": 0,
+        "order": 47,
+        "inputs": [{ "name": "value", "label": "value", "type": "STRING", "localized_name": "value", "widget": { "name": "value" } }],
+        "outputs": [{ "name": "STRING", "links": [725], "label": "STRING", "type": "STRING", "localized_name": "STRING" }],
+        "widgets_values": ["A cinematic handheld close-up of a subject in soft window light. The camera slowly pushes in, then subtly drifts and tilts as the subject changes expression, shifts posture, glances into the lens, and breathes naturally. Rich micro-expressions, subtle body movement, natural cloth motion, dramatic but believable cinematography."],
+        "flags": {},
+        "properties": { "cnr_id": "comfy-core", "hasSecondTab": false, "ver": "0.16.3", "widget_ue_connectable": {}, "secondTabText": "Send Back", "enableTabs": false, "secondTabOffset": 80, "Node name for S&R": "PrimitiveStringMultiline", "tabWidth": 65, "secondTabWidth": 65, "tabXOffset": 10 }
+      }
+    ],
+    "links": [],
+    "groups": [],
+    "extra": {
+      "notes": [
+        "This repository stores the experimental three-stage sampling workflow as a standalone asset.",
+        "The in-app execution path is intentionally gated until a dedicated executor is wired in.",
+        "Derived from a ComfyUI LTX 2.3 three-stage latent-upscale workflow shape."
+      ]
+    }
+  }
+}
