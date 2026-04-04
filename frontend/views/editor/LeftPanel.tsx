@@ -5,6 +5,7 @@ import {
   Plus, FileUp, Film, LayoutGrid, List, ArrowUpDown,
 } from 'lucide-react'
 import type { Asset, TimelineClip, Timeline } from '../../types/project'
+import { pathToFileUrl } from '../../lib/file-url'
 import { VideoThumbnailCard } from './VideoThumbnailCard'
 import { getColorLabel, COLOR_LABELS } from './video-editor-utils'
 import { Tooltip } from '../../components/ui/tooltip'
@@ -134,6 +135,9 @@ export function LeftPanel(props: LeftPanelProps) {
     handleFinishRename,
     setRenamingTimelineId,
   } = props
+
+  const getAssetMediaUrl = (asset: Pick<Asset, 'url' | 'path'>): string => asset.url ?? pathToFileUrl(asset.path)
+  const getThumbnailFor = (asset: Pick<Asset, 'url' | 'path'>): string | undefined => thumbnailMap[getAssetMediaUrl(asset)]
 
   const [assetViewMode, setAssetViewMode] = useState<'grid' | 'list'>('grid')
   const [listSortCol, setListSortCol] = useState<'name' | 'type' | 'duration' | 'resolution' | 'date' | 'color'>('name')
@@ -437,7 +441,12 @@ export function LeftPanel(props: LeftPanelProps) {
                           pushAssetUndoRef.current()
                           setAssetActiveTake(currentProjectId, takesAsset.id, idx)
                         }
-                        loadSourceAsset({ ...takesAsset, url: take.url, path: take.path, thumbnail: take.thumbnail || takesAsset.thumbnail })
+                        loadSourceAsset({
+                          ...takesAsset,
+                          url: take.url ?? pathToFileUrl(take.path),
+                          path: take.path,
+                          thumbnail: take.thumbnail || takesAsset.thumbnail,
+                        })
                       }}
                       onContextMenu={(e) => {
                         e.preventDefault()
@@ -447,11 +456,11 @@ export function LeftPanel(props: LeftPanelProps) {
                     >
                       {takesAsset.type === 'video' ? (
                         <VideoThumbnailCard
-                          url={take.url}
-                          thumbnailUrl={thumbnailMap[take.url]}
+                          url={take.url ?? pathToFileUrl(take.path)}
+                          thumbnailUrl={getThumbnailFor({ url: take.url, path: take.path })}
                         />
                       ) : (
-                        <img src={take.url} alt="" className="w-full aspect-video object-cover" />
+                        <img src={take.url ?? pathToFileUrl(take.path)} alt="" className="w-full aspect-video object-cover" />
                       )}
                       
                       {/* Active overlay */}
@@ -692,8 +701,8 @@ export function LeftPanel(props: LeftPanelProps) {
                   )}
                   {asset.type === 'video' ? (
                     <VideoThumbnailCard
-                      url={asset.url}
-                      thumbnailUrl={thumbnailMap[asset.url]}
+                      url={getAssetMediaUrl(asset)}
+                      thumbnailUrl={getThumbnailFor(asset)}
                     />
                   ) : asset.type === 'audio' ? (
                     <div className="w-full aspect-video bg-gradient-to-br from-emerald-900/60 to-zinc-900 flex flex-col items-center justify-center gap-1.5">
@@ -717,7 +726,7 @@ export function LeftPanel(props: LeftPanelProps) {
                       <p className="text-[9px] text-blue-300/70 font-medium">Adjustment Layer</p>
                     </div>
                   ) : (
-                    <img src={asset.url} alt="" className="w-full aspect-video object-cover" />
+                    <img src={getAssetMediaUrl(asset)} alt="" className="w-full aspect-video object-cover" />
                   )}
                   {selectedAssetIds.has(asset.id) && (
                     <div className="absolute inset-0 bg-blue-600/25 pointer-events-none z-[1]" />
@@ -939,8 +948,8 @@ export function LeftPanel(props: LeftPanelProps) {
                     {/* Thumbnail */}
                     <div className="w-8 h-6 flex-shrink-0 rounded overflow-hidden bg-zinc-800">
                       {asset.type === 'video' ? (
-                        thumbnailMap[asset.url] ? (
-                          <img src={thumbnailMap[asset.url]} alt="" className="w-full h-full object-cover" />
+                        getThumbnailFor(asset) ? (
+                          <img src={getThumbnailFor(asset)} alt="" className="w-full h-full object-cover" />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center"><Film className="h-2.5 w-2.5 text-zinc-500" /></div>
                         )
@@ -949,7 +958,7 @@ export function LeftPanel(props: LeftPanelProps) {
                       ) : asset.type === 'adjustment' ? (
                         <div className="w-full h-full flex items-center justify-center bg-blue-900/30"><Layers className="h-2.5 w-2.5 text-blue-400" /></div>
                       ) : (
-                        <img src={asset.url} alt="" className="w-full h-full object-cover" />
+                        <img src={getAssetMediaUrl(asset)} alt="" className="w-full h-full object-cover" />
                       )}
                     </div>
                     {/* Name column */}

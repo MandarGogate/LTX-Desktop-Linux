@@ -7,7 +7,15 @@ import { VideoEditor } from './VideoEditor'
 import type { ProjectTab } from '../types/project'
 
 export function Project() {
-  const { currentProject, currentTab, setCurrentTab, goHome } = useProjects()
+  const {
+    currentProject,
+    currentTab,
+    setCurrentProject,
+    setCurrentTab,
+    goHome,
+    pendingRetakeUpdate,
+    pendingIcLoraUpdate,
+  } = useProjects()
   
   if (!currentProject) {
     return (
@@ -72,7 +80,12 @@ export function Project() {
           <GenSpace />
         </div>
         <div className={`absolute inset-0 ${currentTab === 'video-editor' ? '' : 'invisible pointer-events-none'}`}>
-          <VideoEditor />
+          <VideoEditor
+            currentProject={currentProject}
+            setCurrentProject={setCurrentProject}
+            pendingRetakeUpdate={pendingRetakeUpdate}
+            pendingIcLoraUpdate={pendingIcLoraUpdate}
+          />
         </div>
       </main>
     </div>

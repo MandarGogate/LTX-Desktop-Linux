@@ -13,6 +13,7 @@ import { useRetake } from '../hooks/use-retake'
 import { useIcLora } from '../hooks/use-ic-lora'
 import type { ICLoraConditioningType, ICLoraModelType } from '../components/ICLoraPanel'
 import type { Asset } from '../types/project'
+import { pathToFileUrl } from '../lib/file-url'
 import { GenerationErrorDialog } from '../components/GenerationErrorDialog'
 import type { GenerationSettings } from '../components/SettingsPanel'
 import { copyToAssetFolder } from '../lib/asset-copy'
@@ -34,6 +35,10 @@ import { logger } from '../lib/logger'
 import { persistSelectableFile } from '../lib/web-file-upload'
 import { RetakePanel } from '../components/RetakePanel'
 import { ICLoraPanel, CONDITIONING_TYPES, IC_LORA_MODEL_TYPES, getConditioningTypesForModel } from '../components/ICLoraPanel'
+
+function getAssetMediaUrl(asset: Pick<Asset, 'url' | 'path'>): string {
+  return asset.url ?? pathToFileUrl(asset.path)
+}
 
 // Asset card with hover overlays
 function AssetCard({
@@ -88,7 +93,7 @@ function AssetCard({
   const handleDownload = (e: React.MouseEvent) => {
     e.stopPropagation()
     const a = document.createElement('a')
-    a.href = asset.url
+    a.href = getAssetMediaUrl(asset)
     a.download = asset.path.split('/').pop() || `${asset.type}-${asset.id}`
     a.click()
   }
@@ -105,14 +110,14 @@ function AssetCard({
       {asset.type === 'video' ? (
         <video 
           ref={videoRef}
-          src={asset.url} 
+          src={getAssetMediaUrl(asset)} 
           className="w-full aspect-video object-contain"
           muted={isMuted}
           loop
           onTimeUpdate={handleTimeUpdate}
         />
       ) : (
-        <img src={asset.url} alt="" className="w-full aspect-video object-contain" />
+        <img src={getAssetMediaUrl(asset)} alt="" className="w-full aspect-video object-contain" />
       )}
       
       {/* Favorite heart - always visible when favorited */}
@@ -404,7 +409,7 @@ function PromptBar({
     if (assetData) {
       const asset = JSON.parse(assetData) as Asset
       if (asset.type === 'image') {
-        onInputImageChange(asset.url)
+        onInputImageChange(getAssetMediaUrl(asset))
       }
     }
 
@@ -423,7 +428,7 @@ function PromptBar({
     if (assetData) {
       const asset = JSON.parse(assetData) as Asset
       if (asset.type === 'audio') {
-        onInputAudioChange(asset.url)
+        onInputAudioChange(getAssetMediaUrl(asset))
       }
     }
 
@@ -1493,7 +1498,7 @@ export function GenSpace() {
   
   const handleCreateVideo = (imageAsset: Asset) => {
     setMode('video')
-    setInputImage(imageAsset.url)
+    setInputImage(getAssetMediaUrl(imageAsset))
     setPrompt(`${imageAsset.prompt || 'The scene comes to life...'}`)
   }
 
@@ -1502,7 +1507,7 @@ export function GenSpace() {
     setPrompt('')
     setActiveRetakeSource(null)
     setRetakeInitial({
-      videoUrl: videoAsset.url,
+      videoUrl: getAssetMediaUrl(videoAsset),
       videoPath: videoAsset.path,
       duration: videoAsset.duration,
     })
@@ -1514,7 +1519,7 @@ export function GenSpace() {
     setMode('ic-lora')
     setPrompt('')
     setActiveIcLoraSource(null)
-    setIcLoraInitial({ videoUrl: videoAsset.url, videoPath: videoAsset.path, imageUrl: null, imagePath: null })
+    setIcLoraInitial({ videoUrl: getAssetMediaUrl(videoAsset), videoPath: videoAsset.path, imageUrl: null, imagePath: null })
     setIcLoraDuration(null)
     setIcLoraPanelKey((prev) => prev + 1)
   }

@@ -17,6 +17,7 @@ interface ProjectContextType {
   // Projects
   projects: Project[]
   currentProject: Project | null
+  setCurrentProject: (project: Project) => void
   createProject: (name: string) => Project
   deleteProject: (id: string) => void
   renameProject: (id: string, name: string) => void
@@ -47,10 +48,14 @@ interface ProjectContextType {
   // Cross-view communication (editor → gen space)
   genSpaceEditImageUrl: string | null
   setGenSpaceEditImageUrl: (url: string | null) => void
+  genSpaceEditImagePath: string | null
+  setGenSpaceEditImagePath: (path: string | null) => void
   genSpaceEditMode: 'image' | 'video' | null
   setGenSpaceEditMode: (mode: 'image' | 'video' | null) => void
   genSpaceAudioUrl: string | null
   setGenSpaceAudioUrl: (url: string | null) => void
+  genSpaceAudioPath: string | null
+  setGenSpaceAudioPath: (path: string | null) => void
   genSpaceRetakeSource: GenSpaceRetakeSource | null
   setGenSpaceRetakeSource: (source: GenSpaceRetakeSource | null) => void
   pendingRetakeUpdate: PendingRetakeUpdate | null
@@ -169,7 +174,7 @@ function recoverAssetUrls(project: Project): Project {
       const fixedUrl = pathToFileUrl(asset.path)
       const fixedTakes = asset.takes?.map(t => ({
         ...t,
-        url: t.url.startsWith('blob:') && isRealPath(t.path) ? pathToFileUrl(t.path) : t.url
+        url: t.url?.startsWith('blob:') && isRealPath(t.path) ? pathToFileUrl(t.path) : t.url
       }))
       return { ...asset, url: fixedUrl, takes: fixedTakes || asset.takes }
     }
@@ -243,6 +248,11 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   }, [projects])
   
   const currentProject = projects.find(p => p.id === currentProjectId) || null
+  const setCurrentProject = useCallback((project: Project) => {
+    setProjects(prev => prev.map(existing => (
+      existing.id === project.id ? normalizeProjectUrls(project) : existing
+    )))
+  }, [])
   
   const createProject = useCallback((name: string): Project => {
     const defaultTimeline = createDefaultTimeline('Timeline 1')
@@ -540,6 +550,14 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const openPlayground = useCallback(() => {
     setCurrentView('playground')
   }, [])
+
+  const setGenSpaceEditImagePath = useCallback((path: string | null) => {
+    setGenSpaceEditImageUrl(path ? toServableUrl(path) : null)
+  }, [])
+
+  const setGenSpaceAudioPath = useCallback((path: string | null) => {
+    setGenSpaceAudioUrl(path ? toServableUrl(path) : null)
+  }, [])
   
   return (
     <ProjectContext.Provider value={{
@@ -551,6 +569,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       setCurrentTab,
       projects,
       currentProject,
+      setCurrentProject,
       createProject,
       deleteProject,
       renameProject,
@@ -573,10 +592,14 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       openPlayground,
       genSpaceEditImageUrl,
       setGenSpaceEditImageUrl,
+      genSpaceEditImagePath: genSpaceEditImageUrl,
+      setGenSpaceEditImagePath,
       genSpaceEditMode,
       setGenSpaceEditMode,
       genSpaceAudioUrl,
       setGenSpaceAudioUrl,
+      genSpaceAudioPath: genSpaceAudioUrl,
+      setGenSpaceAudioPath,
       genSpaceRetakeSource,
       setGenSpaceRetakeSource,
       pendingRetakeUpdate,

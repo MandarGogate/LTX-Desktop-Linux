@@ -25,9 +25,13 @@ export interface GenerationParams {
 
 // A single "take" (version) of a generated asset
 export interface AssetTake {
-  url: string
+  url?: string
   path: string
   thumbnail?: string
+  bigThumbnailPath?: string
+  smallThumbnailPath?: string
+  width?: number
+  height?: number
   createdAt: number
 }
 
@@ -35,12 +39,16 @@ export interface Asset {
   id: string
   type: 'image' | 'video' | 'audio' | 'adjustment'
   path: string
-  url: string
+  url?: string
   prompt: string
   resolution: string
   duration?: number // For videos
   createdAt: number
   thumbnail?: string
+  bigThumbnailPath?: string
+  smallThumbnailPath?: string
+  width?: number
+  height?: number
   favorite?: boolean
   bin?: string // Bin/folder name for organization (undefined = no bin)
   // Regeneration support

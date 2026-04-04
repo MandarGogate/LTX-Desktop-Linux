@@ -15,6 +15,7 @@ export interface ParsedMediaRef {
   name: string
   pathUrl: string        // Original path from the XML
   resolvedPath: string   // Resolved local path (may need relinking)
+  path?: string
   duration: number       // in seconds
   type: 'video' | 'audio' | 'image'
   width?: number
@@ -22,6 +23,8 @@ export interface ParsedMediaRef {
   fps?: number
   found: boolean         // whether the file exists on disk
   relinkedPath?: string  // user-provided relinked path
+  bigThumbnailPath?: string
+  smallThumbnailPath?: string
 }
 
 export interface ParsedClip {
@@ -306,6 +309,7 @@ function parseFcp7Xml(doc: Document): ParsedTimeline | null {
       name: fileName,
       pathUrl,
       resolvedPath,
+      path: resolvedPath,
       duration: fileDuration,
       type,
       width,
@@ -353,6 +357,7 @@ function parseFcp7Xml(doc: Document): ParsedTimeline | null {
             name: fileName,
             pathUrl,
             resolvedPath,
+            path: resolvedPath,
             duration: (outFrame - inFrame) / clipFps,
             type: detectMediaType(fileName),
             found: false,
@@ -700,6 +705,7 @@ function parseFcpXml(doc: Document): ParsedTimeline | null {
       name: assetName || src.split('/').pop() || 'Unknown',
       pathUrl: src,
       resolvedPath,
+      path: resolvedPath,
       duration: dur,
       type,
       width,

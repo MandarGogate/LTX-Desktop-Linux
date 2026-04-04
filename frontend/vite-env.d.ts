@@ -26,29 +26,37 @@ interface Window {
     openLtxApiKeyPage: () => Promise<boolean>
     openFalApiKeyPage: () => Promise<boolean>
     openParentFolderOfFile: (filePath: string) => Promise<void>
-    showItemInFolder: (filePath: string) => Promise<void>
+    showItemInFolder: (filePath: string | { filePath: string }) => Promise<void>
     getLogs: () => Promise<LogsResponse>
     getLogPath: () => Promise<{ logPath: string; logDir: string }>
     openLogFolder: () => Promise<boolean>
     getResourcePath: () => Promise<string | null>
     getDownloadsPath: () => Promise<string>
     copyToProjectAssets: (srcPath: string, projectId: string) => Promise<{ success: boolean; path?: string; url?: string; error?: string }>
+    getPathForFile?: (file: File) => string | null
     getProjectAssetsPath: () => Promise<string>
     openProjectAssetsPathChangeDialog: () => Promise<{ success: boolean; path?: string; error?: string }>
     showSaveDialog: (options: { title?: string; defaultPath?: string; filters?: { name: string; extensions: string[] }[] }) => Promise<string | null>
-    saveFile: (filePath: string, data: string, encoding?: string) => Promise<{ success: boolean; path?: string; error?: string }>
+    saveFile: (
+      filePathOrOptions: string | { filePath: string; data: string; encoding?: string },
+      data?: string,
+      encoding?: string
+    ) => Promise<{ success: boolean; path?: string; error?: string }>
     saveBinaryFile: (filePath: string, data: ArrayBuffer) => Promise<{ success: boolean; path?: string; error?: string }>
     showOpenDirectoryDialog: (options: { title?: string }) => Promise<string | null>
-    checkFilesExist: (filePaths: string[]) => Promise<Record<string, boolean>>
+    checkFilesExist: (filePaths: string[] | { filePaths: string[] }) => Promise<Record<string, boolean>>
     showOpenFileDialog: (options: { title?: string; filters?: { name: string; extensions: string[] }[]; properties?: string[] }) => Promise<string[] | null>
-    searchDirectoryForFiles: (directory: string, filenames: string[]) => Promise<Record<string, string | null>>
+    searchDirectoryForFiles: (
+      directoryOrOptions: string | { directory: string; filenames: string[] },
+      filenames?: string[]
+    ) => Promise<Record<string, string | null>>
     exportNative: (data: {
-      clips: { url: string; type: string; startTime: number; duration: number; trimStart: number; speed: number; reversed: boolean; flipH: boolean; flipV: boolean; opacity: number; trackIndex: number; muted: boolean; volume: number }[]
+      clips: { url?: string; path?: string; type: string; startTime: number; duration: number; trimStart: number; speed: number; reversed: boolean; flipH: boolean; flipV: boolean; opacity: number; trackIndex: number; muted: boolean; volume: number }[]
       outputPath: string; codec: string; width: number; height: number; fps: number; quality: number
       letterbox?: { ratio: number; color: string; opacity: number }
       subtitles?: { text: string; startTime: number; endTime: number; style: { fontSize: number; fontFamily: string; fontWeight: string; color: string; backgroundColor: string; position: string; italic: boolean } }[]
     }) => Promise<{ success?: boolean; error?: string }>
-    exportCancel: (sessionId: string) => Promise<{ ok?: boolean }>
+    exportCancel: (sessionId: string | { sessionId: string }) => Promise<{ ok?: boolean }>
     checkPythonReady: () => Promise<{ ready: boolean }>
     startPythonSetup: () => Promise<void>
     startPythonBackend: () => Promise<void>
@@ -56,7 +64,12 @@ interface Window {
     onPythonSetupProgress: (cb: (data: unknown) => void) => void
     removePythonSetupProgress: () => void
     onBackendHealthStatus: (cb: (data: BackendHealthStatus) => void) => (() => void)
-    extractVideoFrame: (videoUrl: string, seekTime: number, width?: number, quality?: number) => Promise<{ path: string; url: string }>
+    extractVideoFrame: (
+      videoUrlOrOptions: string | { videoPath?: string; videoUrl?: string; seekTime: number; width?: number; quality?: number },
+      seekTime?: number,
+      width?: number,
+      quality?: number
+    ) => Promise<{ path: string; url: string }>
     writeLog: (level: string, message: string) => Promise<void>
     openModelsDirChangeDialog: () => Promise<{ success: boolean; path?: string; error?: string }>
     getAnalyticsState: () => Promise<{ analyticsEnabled: boolean; installationId: string }>
