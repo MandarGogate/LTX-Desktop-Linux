@@ -38,6 +38,7 @@ class FastVideoPipeline(Protocol):
         output_path: str,
         progress_callback: "Callable[[int, int], None] | None" = None,
         negative_prompt: str = "",
+        advanced_mode: str = "standard",
     ) -> None:
         ...
 

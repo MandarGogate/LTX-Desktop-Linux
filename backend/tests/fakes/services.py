@@ -542,6 +542,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         output_path: str,
         progress_callback: Any = None,
         negative_prompt: str = "",
+        advanced_mode: str = "standard",
     ) -> None:
         self._record_generate(
             {
@@ -554,6 +555,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
                 "images": images,
                 "output_path": output_path,
                 "negative_prompt": negative_prompt,
+                "advanced_mode": advanced_mode,
             }
         )
         # Simulate step progress
@@ -780,8 +782,9 @@ class FakeRetakePipeline:
         loras: list[object] | None = None,
         quantization: object | None = None,
         vram_manager: object | None = None,
+        text_encoder_variant_path: str | None = None,
     ) -> "FakeRetakePipeline":
-        del checkpoint_path, gemma_root, device, loras, quantization, vram_manager
+        del checkpoint_path, gemma_root, device, loras, quantization, vram_manager, text_encoder_variant_path
         pipeline = FakeRetakePipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeRetakePipeline singleton is not bound")

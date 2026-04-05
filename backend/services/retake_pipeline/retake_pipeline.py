@@ -24,6 +24,7 @@ class RetakePipeline(Protocol):
         loras: list["LoraPathStrengthAndSDOps"] | None = None,
         quantization: "QuantizationPolicy | None" = None,
         vram_manager: "VRAMManager | None" = None,
+        text_encoder_variant_path: str | None = None,
     ) -> "RetakePipeline": ...
 
     def generate(

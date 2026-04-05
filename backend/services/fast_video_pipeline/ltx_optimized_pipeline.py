@@ -287,6 +287,12 @@ class LTXOptimizedPipeline:
                     GemmaTextEncoderConfigurator,
                     module_ops_from_gemma_root,
                 )
+                from services.text_encoder.safetensors_text_encoder_builder import (
+                    SafetensorsGemmaTextEncoderBuilder,
+                )
+                from services.text_encoder.text_encoder_variant_utils import (
+                    variant_uses_wrapped_gemma_text_encoder_keys,
+                )
                 variant_path = str(Path(self._text_encoder_variant_path))
                 module_ops = module_ops_from_gemma_root(self._gemma_root)
                 # Use DummyRegistry for the variant builder to avoid meta-device
@@ -315,12 +321,28 @@ class LTXOptimizedPipeline:
                 else:
                     variant_model_path = (str(self._checkpoint_path), variant_path)
 
-                self.model_ledger.text_encoder_builder = Builder(
+                variant_module_ops = (
+                    (*module_ops,)
+                    if variant_uses_wrapped_gemma_text_encoder_keys(variant_path)
+                    else (GEMMA_MODEL_OPS, *module_ops)
+                )
+                if variant_module_ops == (*module_ops,):
+                    logger.info(
+                        "Text encoder variant already uses wrapped keys; skipping GEMMA_MODEL_OPS prefix: %s",
+                        variant_path,
+                    )
+                base_variant_builder = Builder(
                     model_path=variant_model_path,
                     model_class_configurator=GemmaTextEncoderConfigurator,
                     model_sd_ops=AV_GEMMA_TEXT_ENCODER_KEY_OPS,
                     registry=DummyRegistry(),
-                    module_ops=(GEMMA_MODEL_OPS, *module_ops),
+                    module_ops=variant_module_ops,
+                )
+                self.model_ledger.text_encoder_builder = SafetensorsGemmaTextEncoderBuilder(
+                    base_builder=base_variant_builder,
+                    checkpoint_sources=variant_model_path,
+                    module_ops=variant_module_ops,
+                    variant_path=variant_path,
                 )
                 logger.info("Using text encoder variant: %s", variant_path)
             except Exception as exc:
@@ -828,7 +850,9 @@ class LTXOptimizedPipeline:
         output_path: str,
         progress_callback: Any = None,
         negative_prompt: str = "",
+        advanced_mode: str = "standard",
     ) -> None:
+        del advanced_mode
         import torch
         with torch.inference_mode():
             self._generate_impl(
@@ -912,14 +936,9 @@ class LTXOptimizedPipeline:
 
             gemma = getattr(text_encoder, "model", None)
             if gemma is not None:
-                _device = self.device
-                if not getattr(gemma, "_device_override_applied", False):
-                    class _DeviceOverride(type(gemma)):  # type: ignore[misc]
-                        @property
-                        def device(self_inner: Any) -> Any:  # type: ignore[override]
-                            return _device
-                    gemma.__class__ = _DeviceOverride  # type: ignore[assignment]
-                    gemma._device_override_applied = True  # type: ignore[attr-defined]
+                from services.text_encoder.ltx_text_encoder import _set_text_encoder_runtime_device
+
+                _set_text_encoder_runtime_device(text_encoder, self.device)
 
             context_p = encode_text(text_encoder, prompts=[prompt])[0]
             video_context, audio_context = self._normalize_text_contexts(*context_p)

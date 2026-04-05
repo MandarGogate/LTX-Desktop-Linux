@@ -14,6 +14,7 @@ from services.gguf_loader.gguf_lazy_loader import (
 )
 from services.text_encoder.gguf_text_encoder_builder import (
     GGUFGemmaTextEncoderBuilder,
+    _place_built_gguf_text_encoder,
     remap_gemma3_gguf_keys,
 )
 
@@ -157,3 +158,16 @@ def test_gguf_text_encoder_builder_uses_base_builder_model_paths(monkeypatch: py
 
     assert isinstance(text_encoder, torch.nn.Module)
     assert captured["paths"] == ["projection.safetensors", "connector.safetensors"]
+
+
+def test_place_built_gguf_text_encoder_keeps_cuda_target_on_cpu() -> None:
+    text_encoder = torch.nn.Linear(1, 1)
+
+    placed = _place_built_gguf_text_encoder(
+        text_encoder,
+        target_device=torch.device("cuda"),
+    )
+
+    assert placed.weight.device.type == "cpu"
+    assert getattr(placed, "_ltx_runtime_target_device") == "cuda"
+    assert getattr(placed, "_ltx_built_on_cpu_for_low_vram") is True

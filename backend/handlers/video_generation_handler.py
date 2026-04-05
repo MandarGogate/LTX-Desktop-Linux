@@ -51,6 +51,15 @@ A2V_FORCED_API_RESOLUTION_LABEL = "1080p"
 FORCED_API_ALLOWED_ASPECT_RATIOS = {"16:9", "9:16"}
 FORCED_API_ALLOWED_FPS = {24, 25, 48, 50}
 
+_EXPERIMENTAL_THREE_STAGE_SIZE_MAP: dict[tuple[int, int], tuple[int, int]] = {
+    (960, 544): (896, 512),
+    (544, 960): (512, 896),
+    (1280, 704): (1152, 640),
+    (704, 1280): (640, 1152),
+    (1920, 1088): (1792, 1024),
+    (1088, 1920): (1024, 1792),
+}
+
 
 def _get_allowed_durations(model_id: str, resolution_label: str, fps: int) -> set[int]:
     if model_id == "ltx-2-3-fast" and resolution_label == "1080p" and fps in {24, 25}:
@@ -61,6 +70,11 @@ def _get_allowed_durations(model_id: str, resolution_label: str, fps: int) -> se
 def _is_gpu_oom_error(exc: BaseException) -> bool:
     message = str(exc).lower()
     return "cuda out of memory" in message or "outofmemoryerror" in message
+
+
+def _resolve_experimental_three_stage_size(width: int, height: int) -> tuple[int, int]:
+    """Use nearest exact 3-stage-compatible dimensions for shipped presets."""
+    return _EXPERIMENTAL_THREE_STAGE_SIZE_MAP.get((width, height), (width, height))
 
 
 class VideoGenerationHandler(StateHandlerBase):
@@ -87,25 +101,13 @@ class VideoGenerationHandler(StateHandlerBase):
         duration = float(req.duration)
         fps = int(float(req.fps))
 
-        if req.advancedMode == "experimental_three_stage_sampling":
-            image_path = normalize_optional_path(req.imagePath)
-            if image_path is None:
-                raise HTTPError(
-                    400,
-                    "Experimental Three Stage Sampling currently requires an input image.",
-                )
-            if req.audioPath:
+        audio_path = normalize_optional_path(req.audioPath)
+        if audio_path:
+            if req.advancedMode == "experimental_three_stage_sampling":
                 raise HTTPError(
                     400,
                     "Experimental Three Stage Sampling does not support audio-to-video yet.",
                 )
-            raise HTTPError(
-                400,
-                "Experimental Three Stage Sampling has been added as a standalone workflow asset, but the dedicated in-app executor is not wired yet.",
-            )
-
-        audio_path = normalize_optional_path(req.audioPath)
-        if audio_path:
             return self._generate_a2v(req, duration, fps, audio_path=audio_path)
 
         logger.info("Resolution %s - using fast pipeline", resolution)
@@ -144,6 +146,18 @@ class VideoGenerationHandler(StateHandlerBase):
             case _:
                 raise HTTPError(400, f"Unsupported aspect ratio: {req.aspectRatio}")
 
+        if req.advancedMode == "experimental_three_stage_sampling":
+            adjusted_width, adjusted_height = _resolve_experimental_three_stage_size(width, height)
+            if (adjusted_width, adjusted_height) != (width, height):
+                logger.info(
+                    "Experimental three-stage sampling: adjusting output size from %dx%d to nearest exact latent-doubling size %dx%d",
+                    width,
+                    height,
+                    adjusted_width,
+                    adjusted_height,
+                )
+                width, height = adjusted_width, adjusted_height
+
         num_frames = self._compute_num_frames(duration, fps)
 
         image = None
@@ -178,6 +192,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 camera_motion=req.cameraMotion,
                 negative_prompt=req.negativePrompt,
                 pipeline_model_type=pipeline_model_type,
+                advanced_mode=req.advancedMode,
             )
 
             self._generation.complete_generation(output_path)
@@ -209,6 +224,7 @@ class VideoGenerationHandler(StateHandlerBase):
         camera_motion: VideoCameraMotion,
         negative_prompt: str,
         pipeline_model_type: str = "fast",
+        advanced_mode: str = "standard",
     ) -> str:
         t_total_start = time.perf_counter()
         gen_mode = "i2v" if image is not None else "t2v"
@@ -298,6 +314,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 output_path=str(output_path),
                 progress_callback=on_step,
                 negative_prompt=negative_prompt,
+                advanced_mode=advanced_mode,
             )
             t_inference_end = time.perf_counter()
             logger.info(

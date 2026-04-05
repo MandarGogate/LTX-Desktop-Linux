@@ -1,25 +1,25 @@
-# LTX Desktop Web
+# LTX Web
 
-A fork of **LTX Desktop** with major additions for **GGUF**, **lower-VRAM local inference**, **custom LoRA support**, and a new **browser-based web mode**.
+## What this fork adds compared with **LTX Desktop**
 
-Compared with `LTX-Desktop`, this fork adds:
+### Runtime and deployment
 
-- **Web mode**: run the app in a browser without Electron
-- **Low-VRAM local generation pipeline** for consumer NVIDIA GPUs
-- **VRAM-aware run modes**: Auto / High / Medium / Low / Very Low
-- **Sequential offloading + block swap** for transformer and text encoder
-- **SageAttention integration** for faster attention kernels where supported
-- **GGUF video model support** including GPU-tier-based quant recommendations
-- **Lazy GGUF loading**
-- **Custom model selection** for:
-  - diffusion checkpoints / GGUF files
-  - LoRAs
-  - text encoder variants
-  - upscaler
-  - processor models
-- **Multiple custom LoRA support**
-- **VRAM profile endpoint/UI** and GPU stats widget
-- **Improved first-run setup** for local model recommendations
+- **Web mode**: run the renderer in a browser without Electron by using the backend `/web/*` routes and the web shim.
+- **Web-safe file and project asset handling**: browser uploads, servable local asset URLs, and HTTP replacements for Electron file IPC.
+- **Model readiness and first-run recommendations**: backend readiness checks plus suggested download bundles based on detected VRAM.
+
+### Low-VRAM local generation
+
+- **VRAM-tiered local generation**: `Auto`, `High VRAM`, `Medium VRAM`, `Low VRAM`, and `Very Low VRAM` modes with per-tier block-swap behavior and resolution guidance.
+- **Low-VRAM LTX pipeline**: sequential component offloading, transformer block swap, text-encoder block swap, and SageAttention where available.
+- **GGUF support for local video generation**: GGUF diffusion models, GGUF text encoders, GGUF model discovery, and GGUF download recommendations.
+
+### Local model flexibility and workflows
+
+- **Custom local model selection**: choose checkpoints or GGUF models, text encoder variants, Z-Image variants, upscaler, and one or more LoRAs from Settings.
+- **Multiple LoRA support**: keep more than one selected LoRA with per-LoRA strength instead of a single preferred LoRA.
+- **Extra local model surfaces** beyond the original defaults: IC-LoRA, depth, pose, person detector, and Z-Image GGUF options.
+- **Gemini-backed timeline gap prompt suggestions**: prompt generation for timeline gap-fill flows in the video editor.
 
 ## Features
 
@@ -38,20 +38,13 @@ Compared with `LTX-Desktop`, this fork adds:
 
 | Platform / hardware | Generation mode | Notes |
 | --- | --- | --- |
-| Windows + NVIDIA CUDA GPU | Local generation supported | Recommended for 11GB+ VRAM |
-| Linux + NVIDIA CUDA GPU | Local generation supported | Recommended for 11GB+ VRAM |
-| macOS (Apple Silicon builds) | Not supported | - |
+| Windows + NVIDIA CUDA GPU | Local generation supported | Practical support starts around 8-12 GB depending on model choice |
+| Linux + NVIDIA CUDA GPU | Local generation supported | Practical support starts around 8-12 GB depending on model choice |
+| macOS (Apple Silicon builds) | Local generation not currently supported | UI-only use may work, but local generation is not supported |
 
-## VRAM requirements and local generation tiers
+## VRAM tiers
 
-This fork no longer assumes you need a **32GB+ GPU** for local generation.
-Local generation is now tiered and can run on smaller NVIDIA GPUs using:
-
-- sequential offloading
-- block swap
-- FP8 where supported
-- optional GGUF quantized models
-- lower resolution / lower frame-count limits on smaller cards
+This fork adds explicit VRAM tiers so local generation can scale down to smaller NVIDIA GPUs by combining offloading, block swap, and GGUF models.
 
 ### Recommended tiers
 
@@ -62,19 +55,7 @@ Local generation is now tiered and can run on smaller NVIDIA GPUs using:
 | Low VRAM | **12-15GB** | Works with heavier offloading | 480p, 540p |
 | Very Low VRAM | **8-11GB** | Most constrained local mode | 360p, 480p |
 
-### Important notes
-
-- **48GB+ VRAM** is the only range where the full model stack can realistically stay on GPU without the low-VRAM tricks.
-- **24GB GPUs are supported locally**, but still rely on offloading / block swap for this fork's LTX 2.3 workflows.
-- **12GB GPUs are experimental but supported** through aggressive offloading and lower resolutions.
-- Performance depends on:
-  - selected resolution / frame count
-  - GGUF quant level
-  - whether upscaler refinement is enabled
-  - LoRAs / conditioning inputs
-  - PCIe / CPU memory bandwidth
-
-### Practical guidance
+Practical guidance:
 
 - **24GB+**: use `Auto` or `High VRAM`; prefer `Q8_0` GGUF if using quantized models
 - **16-23GB**: use `Auto` or `Medium VRAM`; `Q5_1` / `Q4_K_M` GGUF is often a good fit
@@ -87,27 +68,20 @@ Local generation is now tiered and can run on smaller NVIDIA GPUs using:
 
 - 64-bit OS
 - NVIDIA GPU with CUDA support
-- **12GB+ VRAM minimum for local mode**
+- **8GB+ VRAM for constrained local mode; 12GB+ recommended**
 - NVIDIA driver installed
 - 16GB+ system RAM recommended (32GB+ preferred for smoother low-VRAM workflows)
 - Plenty of disk space for model weights and outputs
 
-### VRAM-specific recommendations
-
-- **8-11GB VRAM**: local generation possible at lower resolutions with aggressive offloading
-- **12-15GB VRAM**: better local generation headroom, typically up to 540p
-- **16-23GB VRAM**: comfortable local generation, often up to 720p
-- **24GB+ VRAM**: best local experience, often up to 1080p
-
 ## Install
 
 1. Download the latest installer from GitHub Releases: [Releases](../../releases)
-2. Install and launch **LTX Desktop**
+2. Install and launch **LTX Web**
 3. Complete first-run setup
 
 ## First run & data locations
 
-LTX Desktop stores app data (settings, models, logs) in:
+LTX Web stores app data (settings, models, logs) in:
 
 - **Windows:** `%LOCALAPPDATA%\LTXDesktop\`
 - **macOS:** `~/Library/Application Support/LTXDesktop/`
@@ -117,47 +91,36 @@ Model weights are downloaded into the `models/` subfolder (this can be large and
 
 On first launch you may be prompted to review/accept model license terms (license text is fetched from Hugging Face; requires internet).
 
-This fork also adds GPU-aware first-run checks that can suggest a more suitable local model bundle for your hardware.
+This fork adds GPU-aware first-run checks that can suggest local model bundles for your hardware.
 
-## Model support in this fork
+## Model support added in this fork
 
-This fork expands model file handling beyond the default upstream assumptions.
+- **Diffusion models**: standard checkpoints and GGUF checkpoints
+- **Text encoders**: standard folders, `.safetensors` variants, and GGUF variants
+- **LoRAs**: default distilled LoRA plus multiple custom LoRAs
+- **Image generation models**: Z-Image Turbo standard and GGUF variants
+- **Processor models**: depth, pose, and person detector models for conditioning flows
 
-### Supported / surfaced model categories
+Supported model workflows:
 
-- **Diffusion checkpoints** (`.safetensors`)
-- **GGUF checkpoints** (`.gguf`)
-- **Distilled LoRA**
-- **IC-LoRA**
-- **Text encoder variants** (`.safetensors`, `.gguf`, and variant directories)
-- **2x spatial upscaler**
-- **Depth / pose / person processor models**
-- **Z-Image Turbo model variants**
-
-### Supported workflows
-
-- **Fast**: distilled base / fast settings
+- **Fast (distilled)**: distilled base with fast settings
 - **Balanced**: dev base + distilled LoRA at 8 steps
-- **Quality / Pro**: dev base with configurable steps and optional 2x refinement
+- **Quality/Pro**: dev base with configurable steps and optional 2x upscaler refinement
 - **Custom**: choose your own checkpoint / GGUF / LoRAs / text encoder
 
 ## Text encoding
 
-To generate videos you must configure text encoding:
-
-- **Local text encoder** — download a local text encoder variant if you want a more fully local setup.
-
-This fork also supports selecting custom local text encoder variants, including GGUF-backed options where available.
+This fork adds selectable local text encoder variants, including GGUF-backed options, instead of assuming a single default text encoder layout.
 
 ### Gemini API key (optional)
 
 Used for AI prompt suggestions. When enabled, prompt context and frames may be sent to Google Gemini.
 
-Current Gemini usage in this fork is focused on **prompt suggestion flows** such as timeline gap-fill prompt generation and prompt inference for imported assets.
+Current Gemini usage in this fork is focused on **timeline gap-fill prompt suggestion** flows in the editor.
 
 ## Web mode
 
-This fork can run as a standalone browser app using the same backend.
+This fork can run as a standalone browser app using the same backend used by the desktop app.
 
 ### Quick start
 
@@ -171,6 +134,30 @@ Then open:
 http://127.0.0.1:8000
 ```
 
+### Remote access
+
+To access the app from other machines on your network, bind to `0.0.0.0`:
+
+```bash
+python run.py --host 0.0.0.0 --port 8000
+```
+
+Then open from any device on the same network:
+
+```text
+http://<your-machine-ip>:8000
+```
+
+For remote access over the internet, you can use tunneling tools like [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/), [ngrok](https://ngrok.com/), or [Tailscale](https://tailscale.com/).
+
+Example with Cloudflare Tunnel:
+
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+
+> **Note:** The backend requires an NVIDIA GPU for local generation. Remote/web mode lets you access the UI from any browser, but the GPU must still be on the machine running the backend.
+
 ### Alternative helper scripts
 
 ```bash
@@ -183,12 +170,13 @@ http://127.0.0.1:8000
 
 - Browser-based UI without Electron
 - HTTP replacements for Electron file / app IPC
-- Backend-served file upload and asset persistence helpers
-- Shared frontend codepath between desktop and web deployments
+- Backend-served file upload, project asset, and local file serving helpers
+- Shared frontend codepath between desktop and browser deployments
+- CORS configuration for remote origins via `CORS_ORIGINS` environment variable
 
 ## Architecture
 
-LTX Desktop is split into three main layers:
+LTX Web is split into three main layers:
 
 - **Renderer (`frontend/`)**: TypeScript + React UI.
   - Calls the local backend over HTTP.
@@ -272,7 +260,7 @@ python run.py
 
 ## Telemetry
 
-LTX Desktop collects minimal, anonymous usage analytics (app version, platform, and a random installation ID) to help prioritize development. No personal information or generated content is collected. Analytics is enabled by default and can be disabled in **Settings > General > Anonymous Analytics**. See [`TELEMETRY.md`](docs/TELEMETRY.md) for details.
+LTX Web collects minimal, anonymous usage analytics (app version, platform, and a random installation ID) to help prioritize development. No personal information or generated content is collected. Analytics is enabled by default and can be disabled in **Settings > General > Anonymous Analytics**. See [`TELEMETRY.md`](docs/TELEMETRY.md) for details.
 
 ## Docs
 

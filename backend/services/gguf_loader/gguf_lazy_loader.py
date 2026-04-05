@@ -479,7 +479,11 @@ class GGUFLinear(nn.Linear):
         if weight.device != inputs.device:
             weight = weight.to(inputs.device)
         weight = weight.to(self.compute_dtype)
-        bias = self.bias.to(self.compute_dtype) if self.bias is not None else None
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.to(self.compute_dtype)
+            if bias.device != inputs.device:
+                bias = bias.to(inputs.device)
         return torch.nn.functional.linear(inputs, weight, bias)
 
 
@@ -494,22 +498,29 @@ class GGUFEmbedding(nn.Embedding):
         padding_idx: int | None = None,
         compute_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
-        super().__init__(num_embeddings, embedding_dim, padding_idx=padding_idx, device="meta")
+        super().__init__(num_embeddings, embedding_dim, padding_idx=padding_idx, device="meta")  # pyright: ignore[reportUnknownMemberType]
         self.compute_dtype = compute_dtype
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        weight = dequantize_gguf_tensor(self.weight, dtype=self.compute_dtype)  # type: ignore[arg-type]
-        if weight.device != inputs.device:
-            weight = weight.to(inputs.device)
-        return torch.nn.functional.embedding(
-            inputs,
-            weight.to(self.compute_dtype),
+        # Dequantize GGUF embeddings on CPU and gather there first. Moving the
+        # full embedding table to CUDA can spike VRAM by multiple GB, while the
+        # gathered token embeddings are comparatively small.
+        weight_cpu = dequantize_gguf_tensor(
+            self.weight.to(device="cpu"),  # type: ignore[arg-type]
+            dtype=self.compute_dtype,
+        )
+        gathered = torch.nn.functional.embedding(
+            inputs.to(device="cpu"),
+            weight_cpu.to(self.compute_dtype),
             self.padding_idx,
             self.max_norm,
             self.norm_type,
             self.scale_grad_by_freq,
             self.sparse,
         )
+        if gathered.device != inputs.device:
+            gathered = gathered.to(inputs.device)
+        return gathered
 
 
 # ---------------------------------------------------------------------------

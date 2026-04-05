@@ -112,22 +112,20 @@ export function SettingsPanel({
         <>
           <Select
             label="Generation Mode"
-            badge="EXPERIMENTAL"
             value={settings.advancedMode || 'standard'}
             onChange={(e) => handleChange('advancedMode', e.target.value as 'standard' | 'experimental_three_stage_sampling')}
             disabled={disabled}
           >
             <option value="standard">Standard</option>
-            <option value="experimental_three_stage_sampling">Three Stage Sampling</option>
+            <option value="experimental_three_stage_sampling">Three Stage Sampling — EXPERIMENTAL</option>
           </Select>
 
           {settings.advancedMode === 'experimental_three_stage_sampling' && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100 space-y-1">
               <div className="font-semibold">Experimental advanced mode</div>
               <div>
-                This first implementation installs a standalone workflow asset and enables an opt-in request mode.
-                It currently targets image-to-video only and is intentionally gated server-side until the dedicated
-                executor is wired in.
+                Adds a third latent upscale/refinement pass on top of the existing two-stage local pipeline.
+                This mode is experimental and may increase VRAM use and runtime.
               </div>
             </div>
           )}

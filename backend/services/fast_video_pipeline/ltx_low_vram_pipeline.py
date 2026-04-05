@@ -447,6 +447,12 @@ class LTXLowVRAMPipeline:
                         GemmaTextEncoderConfigurator,
                         module_ops_from_gemma_root,
                     )
+                    from services.text_encoder.safetensors_text_encoder_builder import (
+                        SafetensorsGemmaTextEncoderBuilder,
+                    )
+                    from services.text_encoder.text_encoder_variant_utils import (
+                        variant_uses_wrapped_gemma_text_encoder_keys,
+                    )
 
                     variant_model_path: tuple[str, ...]
                     variant_path_obj = Path(variant_path)
@@ -466,12 +472,28 @@ class LTXLowVRAMPipeline:
                         variant_model_path = (str(self._checkpoint_path), variant_path)
 
                     module_ops = module_ops_from_gemma_root(self._gemma_root)
-                    self.model_ledger.text_encoder_builder = Builder(
+                    variant_module_ops = (
+                        (*module_ops,)
+                        if variant_uses_wrapped_gemma_text_encoder_keys(variant_path)
+                        else (GEMMA_MODEL_OPS, *module_ops)
+                    )
+                    if variant_module_ops == (*module_ops,):
+                        logger.info(
+                            "Text encoder variant already uses wrapped keys; skipping GEMMA_MODEL_OPS prefix: %s",
+                            variant_path,
+                        )
+                    base_variant_builder = Builder(
                         model_path=variant_model_path,
                         model_class_configurator=GemmaTextEncoderConfigurator,
                         model_sd_ops=AV_GEMMA_TEXT_ENCODER_KEY_OPS,
                         registry=DummyRegistry(),
-                        module_ops=(GEMMA_MODEL_OPS, *module_ops),
+                        module_ops=variant_module_ops,
+                    )
+                    self.model_ledger.text_encoder_builder = SafetensorsGemmaTextEncoderBuilder(
+                        base_builder=base_variant_builder,
+                        checkpoint_sources=variant_model_path,
+                        module_ops=variant_module_ops,
+                        variant_path=variant_path,
                     )
                     logger.info("Using text encoder variant: %s", variant_path)
             except Exception as exc:
@@ -568,16 +590,33 @@ class LTXLowVRAMPipeline:
                     GemmaTextEncoderConfigurator,
                     module_ops_from_gemma_root,
                 )
+                from services.text_encoder.safetensors_text_encoder_builder import (
+                    SafetensorsGemmaTextEncoderBuilder,
+                )
+                from services.text_encoder.text_encoder_variant_utils import (
+                    variant_uses_wrapped_gemma_text_encoder_keys,
+                )
 
                 model_folder = next(path.parent for path in Path(self._gemma_root).rglob("model*.safetensors"))
                 weight_paths = [str(path) for path in model_folder.rglob("*.safetensors")]
                 module_ops = module_ops_from_gemma_root(self._gemma_root)
-                self.model_ledger.text_encoder_builder = Builder(
+                variant_module_ops = (
+                    (*module_ops,)
+                    if variant_uses_wrapped_gemma_text_encoder_keys(str(model_folder))
+                    else (GEMMA_MODEL_OPS, *module_ops)
+                )
+                base_text_builder = Builder(
                     model_path=(str(text_projection), *weight_paths),
                     model_class_configurator=GemmaTextEncoderConfigurator,
                     model_sd_ops=AV_GEMMA_TEXT_ENCODER_KEY_OPS,
                     registry=_DummyRegistry(),
-                    module_ops=(GEMMA_MODEL_OPS, *module_ops),
+                    module_ops=variant_module_ops,
+                )
+                self.model_ledger.text_encoder_builder = SafetensorsGemmaTextEncoderBuilder(
+                    base_builder=base_text_builder,
+                    checkpoint_sources=(str(text_projection), *weight_paths),
+                    module_ops=variant_module_ops,
+                    variant_path=str(model_folder),
                 )
             except Exception:
                 logger.warning("Failed to configure split text projection builder", exc_info=True)
@@ -703,7 +742,11 @@ class LTXLowVRAMPipeline:
         frame_rate: float,
     ) -> bool:
         duration_seconds = num_frames / max(frame_rate, 1.0)
-        return max(width, height) >= 1920 and duration_seconds > 5.0
+        # A2V keeps frozen audio latents resident during denoising, so its
+        # memory pressure rises faster than plain T2V/I2V as either duration or
+        # spatial size increases. On 24GB cards, 720p portrait / long clips can
+        # already run close to the limit with the default high-tier policy.
+        return max(width, height) >= 1280 and (duration_seconds > 3.0 or num_frames >= 81)
 
     def _set_block_swap_runtime_policy(
         self,
@@ -726,22 +769,23 @@ class LTXLowVRAMPipeline:
             reason,
         )
 
-    def _restore_default_block_swap_runtime_policy(self) -> None:
+    def _restore_default_block_swap_runtime_policy(self, *, restore_gpu_blocks: bool = False) -> None:
         wrapper = self._block_swap_wrapper
         if wrapper is None:
             return
         default_blocks = getattr(wrapper, "_default_blocks_to_keep_on_gpu", wrapper.blocks_to_keep_on_gpu)
         default_prefetch = getattr(wrapper, "_default_prefetch_distance", wrapper.prefetch_distance)
-        if (
-            wrapper.blocks_to_keep_on_gpu == default_blocks
-            and wrapper.prefetch_distance == default_prefetch
-        ):
-            return
-        self._set_block_swap_runtime_policy(
-            blocks_to_keep_on_gpu=int(default_blocks),
-            prefetch_distance=int(default_prefetch),
-            reason="restore-default",
-        )
+        wrapper.blocks_to_keep_on_gpu = int(default_blocks)
+        wrapper.prefetch_distance = int(default_prefetch)
+        if restore_gpu_blocks:
+            wrapper.offload_all()
+            wrapper.restore_gpu_blocks()
+            logger.info(
+                "Adjusted block swap runtime policy: keeping %d blocks on GPU, prefetch_distance=%d (%s)",
+                wrapper.blocks_to_keep_on_gpu,
+                wrapper.prefetch_distance,
+                "restore-default",
+            )
 
     def _load_gguf_transformer(self) -> Any:
         """Load transformer from GGUF file instead of safetensors.
@@ -1006,6 +1050,79 @@ class LTXLowVRAMPipeline:
     # Generation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_sampling_stage_sizes(
+        *,
+        width: int,
+        height: int,
+        use_upscaler: bool,
+        advanced_mode: str,
+    ) -> tuple[tuple[int, int], tuple[int, int] | None]:
+        """Return stage-1 and optional stage-2 pixel sizes before final decode.
+
+        Standard sampling keeps the existing 2-stage flow:
+        - stage 1 at half resolution
+        - stage 2 at target resolution
+
+        Experimental three-stage sampling shifts the first pass down to quarter
+        resolution so the added extra upscale/refinement pass still lands on the
+        requested final output size, but only when the latent grid can be doubled
+        exactly at each stage.
+        """
+        if not use_upscaler:
+            return (width, height), None
+
+        if advanced_mode == "experimental_three_stage_sampling":
+            stage_1_width = max(64, width // 4)
+            stage_1_height = max(64, height // 4)
+            if LTXLowVRAMPipeline._supports_three_stage_latent_chain(
+                final_width=width,
+                final_height=height,
+                stage_1_width=stage_1_width,
+                stage_1_height=stage_1_height,
+            ):
+                return (stage_1_width, stage_1_height), (width // 2, height // 2)
+
+        return (width // 2, height // 2), None
+
+    @staticmethod
+    def _supports_three_stage_latent_chain(
+        *,
+        final_width: int,
+        final_height: int,
+        stage_1_width: int,
+        stage_1_height: int,
+    ) -> bool:
+        """Whether quarter→half→full can be represented by exact x2 latent upscales."""
+        from ltx_core.types import VideoLatentShape, VideoPixelShape
+
+        final_shape = VideoLatentShape.from_pixel_shape(
+            VideoPixelShape(batch=1, frames=9, width=final_width, height=final_height, fps=8)
+        ).to_torch_shape()
+        stage_2_shape = VideoLatentShape.from_pixel_shape(
+            VideoPixelShape(batch=1, frames=9, width=final_width // 2, height=final_height // 2, fps=8)
+        ).to_torch_shape()
+        stage_1_shape = VideoLatentShape.from_pixel_shape(
+            VideoPixelShape(batch=1, frames=9, width=stage_1_width, height=stage_1_height, fps=8)
+        ).to_torch_shape()
+
+        return (
+            stage_1_shape[-2] * 2 == stage_2_shape[-2]
+            and stage_1_shape[-1] * 2 == stage_2_shape[-1]
+            and stage_2_shape[-2] * 2 == final_shape[-2]
+            and stage_2_shape[-1] * 2 == final_shape[-1]
+        )
+
+    @staticmethod
+    def _supports_image_conditioning_shape(*, width: int, height: int) -> bool:
+        """Whether a pixel size is safe for image-conditioning video encoding.
+
+        The video encoder path used by ``image_conditionings_by_replacing_latent``
+        expects spatial dimensions divisible by 32. Experimental three-stage
+        quarter-resolution passes can violate this for 720p/1080p presets.
+        """
+        return width % 32 == 0 and height % 32 == 0
+
     def generate(
         self,
         prompt: str,
@@ -1018,6 +1135,7 @@ class LTXLowVRAMPipeline:
         output_path: str,
         progress_callback: Any = None,
         negative_prompt: str = "",
+        advanced_mode: str = "standard",
     ) -> None:
         import torch
 
@@ -1033,6 +1151,7 @@ class LTXLowVRAMPipeline:
                 output_path=output_path,
                 progress_callback=progress_callback,
                 negative_prompt=negative_prompt,
+                advanced_mode=advanced_mode,
             )
 
     def _generate_impl(
@@ -1047,6 +1166,7 @@ class LTXLowVRAMPipeline:
         output_path: str,
         progress_callback: Any = None,
         negative_prompt: str = "",
+        advanced_mode: str = "standard",
     ) -> None:
         import torch
 
@@ -1110,17 +1230,9 @@ class LTXLowVRAMPipeline:
         # Patch device property so input_ids are created on GPU
         gemma = getattr(text_encoder, "model", None)
         if gemma is not None:
-            _device = self.device
-            # Avoid re-wrapping the class on every generation (would create
-            # an ever-deepening class hierarchy). Only patch once.
-            if not getattr(gemma, "_device_override_applied", False):
-                class _DeviceOverride(type(gemma)):  # type: ignore[misc]
-                    @property
-                    def device(self_inner: Any) -> Any:  # type: ignore[override]
-                        return _device
+            from services.text_encoder.ltx_text_encoder import _set_text_encoder_runtime_device
 
-                gemma.__class__ = _DeviceOverride  # type: ignore[assignment]
-                gemma._device_override_applied = True  # type: ignore[attr-defined]
+            _set_text_encoder_runtime_device(text_encoder, self.device)
 
         context_p = encode_text(text_encoder, prompts=[prompt])[0]
         video_context, audio_context = self._normalize_text_contexts(*context_p)
@@ -1165,39 +1277,73 @@ class LTXLowVRAMPipeline:
         target_output_shape = VideoPixelShape(
             batch=1, frames=num_frames, width=width, height=height, fps=frame_rate,
         )
-        stage_1_output_shape = target_output_shape
-        if self._use_upscaler:
-            stage_1_output_shape = VideoPixelShape(
+        stage_1_size, stage_2_size = self._resolve_sampling_stage_sizes(
+            width=width,
+            height=height,
+            use_upscaler=self._use_upscaler,
+            advanced_mode=advanced_mode,
+        )
+        stage_1_output_shape = VideoPixelShape(
+            batch=1,
+            frames=num_frames,
+            width=stage_1_size[0],
+            height=stage_1_size[1],
+            fps=frame_rate,
+        )
+        stage_2_output_shape = (
+            VideoPixelShape(
                 batch=1,
                 frames=num_frames,
-                width=width // 2,
-                height=height // 2,
+                width=stage_2_size[0],
+                height=stage_2_size[1],
                 fps=frame_rate,
+            )
+            if stage_2_size is not None
+            else None
+        )
+        use_three_stage_sampling = stage_2_output_shape is not None
+        if advanced_mode == "experimental_three_stage_sampling" and self._use_upscaler and not use_three_stage_sampling:
+            logger.warning(
+                "[low-vram] Experimental three-stage sampling requested for %dx%d, but this resolution "
+                "does not support exact quarter→half→full latent doubling; falling back to standard two-stage sampling",
+                width,
+                height,
             )
 
         conditionings: list[Any] = []
         if images:
             t_phase2 = _time.perf_counter()
             logger.info("[low-vram] Phase 2: Image conditioning")
-            if self._cached_video_encoder is None:
-                video_encoder = self.model_ledger.video_encoder()
-                self._cached_video_encoder = video_encoder
-            else:
-                video_encoder = self._cached_video_encoder
-            self.vram_manager.ensure_on_gpu("video_encoder", video_encoder)
-
-            ltx_images = [_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images]
-            conditionings = image_conditionings_by_replacing_latent(
-                images=ltx_images,
-                height=stage_1_output_shape.height,
+            if self._supports_image_conditioning_shape(
                 width=stage_1_output_shape.width,
-                video_encoder=video_encoder,
-                dtype=self.dtype,
-                device=self.device,
-            )
+                height=stage_1_output_shape.height,
+            ):
+                if self._cached_video_encoder is None:
+                    video_encoder = self.model_ledger.video_encoder()
+                    self._cached_video_encoder = video_encoder
+                else:
+                    video_encoder = self._cached_video_encoder
+                self.vram_manager.ensure_on_gpu("video_encoder", video_encoder)
 
-            self.vram_manager.offload_to_cpu("video_encoder", video_encoder)
-            self.vram_manager.cleanup()
+                ltx_images = [_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images]
+                conditionings = image_conditionings_by_replacing_latent(
+                    images=ltx_images,
+                    height=stage_1_output_shape.height,
+                    width=stage_1_output_shape.width,
+                    video_encoder=video_encoder,
+                    dtype=self.dtype,
+                    device=self.device,
+                )
+
+                self.vram_manager.offload_to_cpu("video_encoder", video_encoder)
+                self.vram_manager.cleanup()
+            else:
+                logger.warning(
+                    "[low-vram] Skipping stage-1 image conditioning for unsupported size %dx%d; "
+                    "later refinement stages will still apply image guidance",
+                    stage_1_output_shape.width,
+                    stage_1_output_shape.height,
+                )
             self._log_vram_usage("after Phase 2")
             logger.info("[low-vram] Phase 2 done: %.2fs", _time.perf_counter() - t_phase2)
 
@@ -1303,7 +1449,10 @@ class LTXLowVRAMPipeline:
 
         if self._use_upscaler:
             t_phase3b = _time.perf_counter()
-            logger.info("[low-vram] Phase 3b: 2x upscaler refinement")
+            stage_2_label = "Phase 3b: 2x upscaler refinement"
+            if use_three_stage_sampling:
+                stage_2_label = "Phase 3b: experimental three-stage mid-res refinement"
+            logger.info("[low-vram] %s", stage_2_label)
 
             if self._cached_video_encoder is None:
                 video_encoder = self.model_ledger.video_encoder()
@@ -1319,6 +1468,7 @@ class LTXLowVRAMPipeline:
                 spatial_upsampler = self._cached_spatial_upsampler
             self.vram_manager.ensure_on_gpu("spatial_upsampler", spatial_upsampler)
 
+            next_stage_output_shape = stage_2_output_shape or target_output_shape
             upscaled_video_latent = upsample_video(
                 latent=video_state.latent[:1],
                 video_encoder=video_encoder,
@@ -1330,8 +1480,8 @@ class LTXLowVRAMPipeline:
                 ltx_images = [_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images]
                 stage_2_conditionings = image_conditionings_by_replacing_latent(
                     images=ltx_images,
-                    height=target_output_shape.height,
-                    width=target_output_shape.width,
+                    height=next_stage_output_shape.height,
+                    width=next_stage_output_shape.width,
                     video_encoder=video_encoder,
                     dtype=self.dtype,
                     device=self.device,
@@ -1340,7 +1490,7 @@ class LTXLowVRAMPipeline:
             stage_2_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
             total_steps += len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1
             video_state, audio_state = denoise_audio_video(
-                output_shape=target_output_shape,
+                output_shape=next_stage_output_shape,
                 conditionings=stage_2_conditionings,
                 noiser=noiser,
                 sigmas=stage_2_sigmas,
@@ -1354,6 +1504,47 @@ class LTXLowVRAMPipeline:
                 initial_audio_latent=audio_state.latent,
             )
 
+            if use_three_stage_sampling:
+                t_phase3c = _time.perf_counter()
+                logger.info("[low-vram] Phase 3c: experimental three-stage final refinement")
+
+                upscaled_video_latent = upsample_video(
+                    latent=video_state.latent[:1],
+                    video_encoder=video_encoder,
+                    upsampler=spatial_upsampler,
+                )
+
+                stage_3_conditionings: list[Any] = []
+                if images:
+                    ltx_images = [_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images]
+                    stage_3_conditionings = image_conditionings_by_replacing_latent(
+                        images=ltx_images,
+                        height=target_output_shape.height,
+                        width=target_output_shape.width,
+                        video_encoder=video_encoder,
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
+
+                stage_3_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
+                total_steps += len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1
+                video_state, audio_state = denoise_audio_video(
+                    output_shape=target_output_shape,
+                    conditionings=stage_3_conditionings,
+                    noiser=noiser,
+                    sigmas=stage_3_sigmas,
+                    stepper=stepper,
+                    denoising_loop_fn=cast(Any, denoising_loop),
+                    components=self.pipeline_components,
+                    dtype=self.dtype,
+                    device=self.device,
+                    noise_scale=stage_3_sigmas[0],
+                    initial_video_latent=upscaled_video_latent,
+                    initial_audio_latent=audio_state.latent,
+                )
+                self._log_vram_usage("after Phase 3c")
+                logger.info("[low-vram] Phase 3c done: %.2fs", _time.perf_counter() - t_phase3c)
+
             self.vram_manager.offload_to_cpu("video_encoder", video_encoder)
             self.vram_manager.offload_to_cpu("spatial_upsampler", spatial_upsampler)
             self.vram_manager.cleanup()
@@ -1363,6 +1554,7 @@ class LTXLowVRAMPipeline:
         # Offload transformer to CPU (keep cached reference)
         if self._block_swap_wrapper is not None:
             self._block_swap_wrapper.offload_all()
+            self._offload_non_block_parts_to_cpu(transformer)
         else:
             self.vram_manager.offload_to_cpu("transformer", transformer)
         # Don't clear self._block_swap_wrapper — reuse it next generation
@@ -1540,22 +1732,26 @@ class LTXLowVRAMPipeline:
         else:
             text_encoder = self._cached_text_encoder
 
-        te_block_swap = self._setup_text_encoder_block_swap_cached(text_encoder)
-        if te_block_swap is None:
+        use_cpu_text_encoding = bool(
+            getattr(text_encoder, "_ltx_gguf_text_encoder", False)
+        )
+        te_block_swap = None if use_cpu_text_encoding else self._setup_text_encoder_block_swap_cached(text_encoder)
+        if use_cpu_text_encoding:
+            logger.info("[low-vram-a2v] Using CPU text encoding for GGUF text encoder")
+            text_encoder.to("cpu")
+        elif te_block_swap is None:
             text_encoder.to(self.device)
         else:
             self._move_text_encoder_non_layers_to_gpu(text_encoder)
 
         gemma = getattr(text_encoder, "model", None)
         if gemma is not None:
-            _device = self.device
-            if not getattr(gemma, "_device_override_applied", False):
-                class _DeviceOverride(type(gemma)):  # type: ignore[misc]
-                    @property
-                    def device(self_inner: Any) -> Any:  # type: ignore[override]
-                        return _device
-                gemma.__class__ = _DeviceOverride  # type: ignore[assignment]
-                gemma._device_override_applied = True  # type: ignore[attr-defined]
+            from services.text_encoder.ltx_text_encoder import _set_text_encoder_runtime_device
+
+            _set_text_encoder_runtime_device(
+                text_encoder,
+                torch.device("cpu") if use_cpu_text_encoding else self.device,
+            )
 
         context_p = encode_text(text_encoder, prompts=[prompt])[0]
         video_context, audio_context = self._normalize_text_contexts(*context_p)
@@ -1668,6 +1864,18 @@ class LTXLowVRAMPipeline:
             transformer = self._cached_transformer
 
         transformer, using_block_swap = self._prepare_a2v_transformer_for_denoise(transformer)
+        if using_block_swap and self._block_swap_wrapper is not None:
+            if self._should_use_conservative_a2v_stage2_block_swap(
+                width=width,
+                height=height,
+                num_frames=num_frames,
+                frame_rate=frame_rate,
+            ):
+                self._set_block_swap_runtime_policy(
+                    blocks_to_keep_on_gpu=1,
+                    prefetch_distance=1,
+                    reason="a2v-stage1-720p-plus-or-long",
+                )
         self._log_vram_usage("before Phase 3 denoise (a2v)")
 
         # Respect the model type: distilled models use the baked-in
@@ -1842,7 +2050,7 @@ class LTXLowVRAMPipeline:
                 self._set_block_swap_runtime_policy(
                     blocks_to_keep_on_gpu=1,
                     prefetch_distance=1,
-                    reason="a2v-stage2-1080p-long",
+                    reason="a2v-stage2-720p-plus-or-long",
                 )
             transformer = self._setup_block_swap_if_needed(transformer)
             self._move_non_block_parts_to_gpu(transformer)
@@ -1869,6 +2077,7 @@ class LTXLowVRAMPipeline:
         # Offload transformer
         if using_block_swap and self._block_swap_wrapper is not None:
             self._block_swap_wrapper.offload_all()
+            self._offload_non_block_parts_to_cpu(transformer)
             self._restore_default_block_swap_runtime_policy()
         else:
             self.vram_manager.offload_to_cpu("transformer", transformer)
@@ -2030,6 +2239,36 @@ class LTXLowVRAMPipeline:
 
         logger.info("Moved non-block transformer parts to GPU")
 
+    def _offload_non_block_parts_to_cpu(self, transformer: torch.nn.Module) -> None:
+        """Move non-transformer-block parts of the model back to CPU."""
+        inner = transformer
+        for sub_name in ("velocity_model", "model", "inner_model"):
+            sub = getattr(inner, sub_name, None)
+            if sub is not None:
+                inner = sub
+                break
+
+        for name, param in inner.named_parameters(recurse=False):
+            param.data = param.data.to("cpu")
+        for name, buf in inner.named_buffers(recurse=False):
+            buf.data = buf.data.to("cpu")
+
+        block_attr_names = {"transformer_blocks", "blocks", "layers", "encoder_layers"}
+        for child_name, child in inner.named_children():
+            if child_name not in block_attr_names:
+                child.to("cpu")
+
+        if inner is not transformer:
+            for name, param in transformer.named_parameters(recurse=False):
+                param.data = param.data.to("cpu")
+            for name, buf in transformer.named_buffers(recurse=False):
+                buf.data = buf.data.to("cpu")
+            for child_name, child in transformer.named_children():
+                if child is not inner:
+                    child.to("cpu")
+
+        logger.info("Offloaded non-block transformer parts to CPU")
+
     # ------------------------------------------------------------------
     # Text encoder FP8 quantisation + layerwise offload
     # ------------------------------------------------------------------
@@ -2158,6 +2397,8 @@ class LTXLowVRAMPipeline:
 
     def _move_text_encoder_non_layers_to_gpu(self, text_encoder: torch.nn.Module) -> None:
         """Move text encoder non-layer components to GPU."""
+        from services.gguf_loader.gguf_lazy_loader import GGUFEmbedding
+
         gemma_model = getattr(text_encoder, "model", None)
         if gemma_model is None:
             text_encoder.to(self.device)
@@ -2167,13 +2408,19 @@ class LTXLowVRAMPipeline:
         if lang_model is None:
             lang_model = getattr(getattr(gemma_model, "model", None), "language_model", None)
 
+        kept_on_cpu: list[str] = []
         if lang_model is not None:
             for child_name, child in lang_model.named_children():
-                if child_name != "layers":
-                    child.to(self.device)
-            for name, param in lang_model.named_parameters(recurse=False):
+                if child_name == "layers":
+                    continue
+                if isinstance(child, GGUFEmbedding):
+                    child.to("cpu")
+                    kept_on_cpu.append(child_name)
+                    continue
+                child.to(self.device)
+            for _, param in lang_model.named_parameters(recurse=False):
                 param.data = param.data.to(self.device)
-            for name, buf in lang_model.named_buffers(recurse=False):
+            for _, buf in lang_model.named_buffers(recurse=False):
                 buf.data = buf.data.to(self.device)
 
         # Keep lm_head off GPU. Prompt encoding only needs hidden_states, and moving
@@ -2181,6 +2428,7 @@ class LTXLowVRAMPipeline:
         lm_head = getattr(gemma_model, "lm_head", None)
         if lm_head is not None:
             lm_head.to("cpu")
+            kept_on_cpu.append("lm_head")
 
         inner_model = getattr(gemma_model, "model", None)
         if inner_model is not None:
@@ -2193,12 +2441,18 @@ class LTXLowVRAMPipeline:
             if child_name != "model":
                 child.to(self.device)
 
-        for name, param in text_encoder.named_parameters(recurse=False):
+        for _, param in text_encoder.named_parameters(recurse=False):
             param.data = param.data.to(self.device)
-        for name, buf in text_encoder.named_buffers(recurse=False):
+        for _, buf in text_encoder.named_buffers(recurse=False):
             buf.data = buf.data.to(self.device)
 
-        logger.info("Moved text encoder non-layer parts to GPU (skipping vision_tower)")
+        if kept_on_cpu:
+            logger.info(
+                "Moved text encoder non-layer parts to GPU (kept on CPU: %s)",
+                ", ".join(kept_on_cpu),
+            )
+        else:
+            logger.info("Moved text encoder non-layer parts to GPU (skipping vision_tower)")
 
     def _log_vram_usage(self, label: str) -> None:
         """Log current allocated VRAM after a phase boundary."""

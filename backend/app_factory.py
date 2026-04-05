@@ -53,7 +53,7 @@ def create_app(
     *,
     handler: "AppHandler",
     allowed_origins: list[str] | None = None,
-    title: str = "LTX-2 Video Generation Server",
+    title: str = "LTX Web",
     auth_token: str = "",
     admin_token: str = "",
 ) -> FastAPI:

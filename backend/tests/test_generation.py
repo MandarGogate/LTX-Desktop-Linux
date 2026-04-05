@@ -228,7 +228,9 @@ class TestGenerate:
         pipeline = fake_services.fast_video_pipeline
         assert pipeline.generate_calls[0]["negative_prompt"] == "low quality, artifacts"
 
-    def test_experimental_three_stage_requires_image(self, client, test_state, create_fake_model_files):
+    def test_experimental_three_stage_t2v_is_forwarded_to_pipeline(
+        self, client, test_state, fake_services, create_fake_model_files
+    ):
         create_fake_model_files()
         _enable_local_text_encoding(test_state)
 
@@ -237,11 +239,12 @@ class TestGenerate:
             json={**_T2V_JSON, "advancedMode": "experimental_three_stage_sampling"},
         )
 
-        assert r.status_code == 400
-        assert "requires an input image" in r.json()["error"]
+        assert r.status_code == 200
+        pipeline = fake_services.fast_video_pipeline
+        assert pipeline.generate_calls[0]["advanced_mode"] == "experimental_three_stage_sampling"
 
-    def test_experimental_three_stage_rejects_until_executor_is_wired(
-        self, client, test_state, create_fake_model_files, tmp_path
+    def test_experimental_three_stage_i2v_is_forwarded_to_pipeline(
+        self, client, test_state, fake_services, create_fake_model_files, tmp_path
     ):
         from PIL import Image
 
@@ -259,8 +262,34 @@ class TestGenerate:
             },
         )
 
-        assert r.status_code == 400
-        assert "standalone workflow asset" in r.json()["error"]
+        assert r.status_code == 200
+        pipeline = fake_services.fast_video_pipeline
+        assert pipeline.generate_calls[0]["advanced_mode"] == "experimental_three_stage_sampling"
+
+    def test_experimental_three_stage_uses_nearest_exact_720p_size(
+        self, client, test_state, fake_services, create_fake_model_files, tmp_path
+    ):
+        from PIL import Image
+
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+        image_path = tmp_path / "input.png"
+        Image.new("RGB", (64, 64), "white").save(image_path)
+
+        r = client.post(
+            "/api/generate",
+            json={
+                **_T2V_JSON,
+                "resolution": "720p",
+                "advancedMode": "experimental_three_stage_sampling",
+                "imagePath": str(image_path),
+            },
+        )
+
+        assert r.status_code == 200
+        pipeline = fake_services.fast_video_pipeline
+        assert pipeline.generate_calls[0]["width"] == 1152
+        assert pipeline.generate_calls[0]["height"] == 640
 
     def test_error_sets_generation_error(self, client, test_state, fake_services, create_fake_model_files):
         create_fake_model_files()

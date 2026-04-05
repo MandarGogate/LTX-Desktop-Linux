@@ -22,6 +22,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _infer_text_encoder_device(text_encoder: object) -> torch.device:
+    if isinstance(text_encoder, torch.nn.Module):
+        for param in text_encoder.parameters():
+            return param.device
+        for buf in text_encoder.buffers():
+            return buf.device
+    return torch.device("cpu")
+
+
+def _set_text_encoder_runtime_device(text_encoder: object, device: torch.device) -> None:
+    gemma = getattr(text_encoder, "model", None)
+    if gemma is None:
+        return
+
+    gemma._ltx_runtime_device_override = torch.device(device)  # type: ignore[attr-defined]
+
+    class _LTXRuntimeDeviceOverride(type(gemma)):  # type: ignore[misc]
+        @property
+        def device(self_inner: Any) -> Any:  # type: ignore[override]
+            override = getattr(self_inner, "_ltx_runtime_device_override", None)
+            if override is not None:
+                return override
+            return _infer_text_encoder_device(text_encoder)
+
+    gemma.__class__ = _LTXRuntimeDeviceOverride  # type: ignore[assignment]
+    gemma._ltx_runtime_device_override_patched = True  # type: ignore[attr-defined]
+
+
 class LTXTextEncoder:
     """Stateless text encoding operations with idempotent monkey-patching."""
 
@@ -351,6 +379,7 @@ class LTXTextEncoder:
                     return out
 
                 prompt_list = [prompts] if isinstance(prompts, str) else list(prompts)
+                caller_supplied_text_encoder = text_encoder is not None
                 effective_text_encoder = text_encoder
                 if effective_text_encoder is None and te_state is not None:
                     effective_text_encoder = te_state.cached_encoder
@@ -358,6 +387,24 @@ class LTXTextEncoder:
                     raise RuntimeError(
                         "Local text encoding requested, but no cached text encoder is available."
                     )
+
+                if not caller_supplied_text_encoder:
+                    if getattr(effective_text_encoder, "_ltx_gguf_text_encoder", False):
+                        # GGUF text encoders may have had their runtime device override
+                        # forced to CUDA by a previous low-VRAM generation pass while
+                        # keeping some weights on CPU. Normalize them back to a fully
+                        # CPU text-encoding path before reusing them elsewhere.
+                        cast(Any, effective_text_encoder).to(torch.device("cpu"))
+                        _set_text_encoder_runtime_device(
+                            effective_text_encoder,
+                            torch.device("cpu"),
+                        )
+                    else:
+                        _set_text_encoder_runtime_device(
+                            effective_text_encoder,
+                            _infer_text_encoder_device(effective_text_encoder),
+                        )
+
                 return cast(
                     list[tuple[torch.Tensor, TensorOrNone]],
                     original_encode_text(cast(Any, effective_text_encoder), prompt_list, *args, **kwargs),

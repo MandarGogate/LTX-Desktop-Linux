@@ -100,6 +100,31 @@ def patch_gemma_forward_hidden_states_only(text_encoder: torch.nn.Module) -> Non
     setattr(model, "_ltx_hidden_states_only_patched", True)
 
 
+
+def _place_built_gguf_text_encoder(
+    text_encoder: torch.nn.Module,
+    *,
+    target_device: torch.device,
+) -> torch.nn.Module:
+    """Place a GGUF text encoder conservatively to avoid CUDA build spikes.
+
+    The low-VRAM and retake pipelines both do their own device/offload handling
+    after construction. Returning a freshly-built GGUF encoder on CUDA can cause
+    an avoidable OOM before block-swap/offload policies take over.
+    """
+    runtime_target = str(target_device)
+    text_encoder._ltx_runtime_target_device = runtime_target  # type: ignore[attr-defined]
+    if target_device.type == "cuda":
+        text_encoder = text_encoder.to(torch.device("cpu"))
+        text_encoder._ltx_built_on_cpu_for_low_vram = True  # type: ignore[attr-defined]
+        logger.info(
+            "Built GGUF text encoder on CPU; deferring CUDA placement to runtime (%s)",
+            runtime_target,
+        )
+        return text_encoder.eval()
+    return text_encoder.to(target_device).eval()
+
+
 def _resolve_checkpoint_sources(checkpoint_sources: Any) -> list[str]:
     if isinstance(checkpoint_sources, (list, tuple)):
         candidates = [str(path) for path in cast(tuple[object, ...] | list[object], checkpoint_sources)]
@@ -173,4 +198,7 @@ class GGUFGemmaTextEncoderBuilder:
         text_encoder._ltx_gguf_text_encoder = True  # type: ignore[attr-defined]
         logger.info("Using GGUF text encoder variant: %s", self.gguf_path)
 
-        return text_encoder.to(target_device).eval()
+        return _place_built_gguf_text_encoder(
+            text_encoder,
+            target_device=target_device,
+        )

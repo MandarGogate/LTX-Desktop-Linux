@@ -230,8 +230,9 @@ def test_retake_pipeline_rebuilds_when_checkpoint_selection_changes(test_state, 
         loras: list[object] | None = None,
         quantization: object | None = None,
         vram_manager: object | None = None,
+        text_encoder_variant_path: str | None = None,
     ) -> StubRetakePipeline:
-        del gemma_root, device, loras, quantization, vram_manager
+        del gemma_root, device, loras, quantization, vram_manager, text_encoder_variant_path
         created.append(checkpoint_path)
         return StubRetakePipeline()
 

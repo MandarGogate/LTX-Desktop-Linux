@@ -16,6 +16,9 @@ from typing import Any
 import pytest
 import torch
 
+from services.gguf_loader.gguf_lazy_loader import GGUFEmbedding
+from services.retake_pipeline.ltx_retake_pipeline import _resolve_text_encoder_device
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -142,6 +145,98 @@ class TestLoRAHooksInstalled:
         assert "_install_lora_hooks" in source, (
             "_load_gguf_transformer must call _install_lora_hooks after loading GGUF weights"
         )
+
+
+class TestSamplingStageSizing:
+    def test_image_conditioning_shape_requires_multiple_of_32(self) -> None:
+        from services.fast_video_pipeline.ltx_low_vram_pipeline import LTXLowVRAMPipeline
+
+        assert LTXLowVRAMPipeline._supports_image_conditioning_shape(width=640, height=352) is True
+        assert LTXLowVRAMPipeline._supports_image_conditioning_shape(width=320, height=176) is False
+
+    def test_standard_sampling_keeps_existing_two_stage_sizes(self) -> None:
+        from services.fast_video_pipeline.ltx_low_vram_pipeline import LTXLowVRAMPipeline
+
+        stage_1, stage_2 = LTXLowVRAMPipeline._resolve_sampling_stage_sizes(
+            width=1920,
+            height=1088,
+            use_upscaler=True,
+            advanced_mode="standard",
+        )
+
+        assert stage_1 == (960, 544)
+        assert stage_2 is None
+
+    def test_experimental_three_stage_falls_back_when_latent_chain_is_inexact(self) -> None:
+        from services.fast_video_pipeline.ltx_low_vram_pipeline import LTXLowVRAMPipeline
+
+        stage_1, stage_2 = LTXLowVRAMPipeline._resolve_sampling_stage_sizes(
+            width=1920,
+            height=1088,
+            use_upscaler=True,
+            advanced_mode="experimental_three_stage_sampling",
+        )
+
+        assert stage_1 == (960, 544)
+        assert stage_2 is None
+
+    def test_experimental_three_stage_uses_quarter_then_half_on_supported_shape(self) -> None:
+        from services.fast_video_pipeline.ltx_low_vram_pipeline import LTXLowVRAMPipeline
+
+        stage_1, stage_2 = LTXLowVRAMPipeline._resolve_sampling_stage_sizes(
+            width=1024,
+            height=1024,
+            use_upscaler=True,
+            advanced_mode="experimental_three_stage_sampling",
+        )
+
+        assert stage_1 == (256, 256)
+        assert stage_2 == (512, 512)
+
+
+class TestGGUFTextEncoderRuntimePlacement:
+    def test_low_vram_keeps_gguf_embedding_on_cpu(self) -> None:
+        from services.fast_video_pipeline.ltx_low_vram_pipeline import LTXLowVRAMPipeline
+
+        pipeline = LTXLowVRAMPipeline.__new__(LTXLowVRAMPipeline)
+        pipeline.device = torch.device("cpu")
+
+        class _LanguageModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embed_tokens = GGUFEmbedding(8, 8).to_empty(device=torch.device("cpu"))
+                self.embed_tokens.weight = torch.nn.Parameter(torch.zeros(8, 8), requires_grad=False)
+                self.layers = torch.nn.ModuleList([torch.nn.Linear(8, 8), torch.nn.Linear(8, 8)])
+                self.norm = torch.nn.LayerNorm(8)
+
+        class _Gemma(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = _LanguageModel()
+                self.lm_head = torch.nn.Linear(8, 8)
+
+        class _TextEncoder(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = _Gemma()
+
+        text_encoder = _TextEncoder()
+        pipeline._move_text_encoder_non_layers_to_gpu(text_encoder)
+
+        assert text_encoder.model.language_model.embed_tokens.weight.device.type == "cpu"
+        assert text_encoder.model.lm_head.weight.device.type == "cpu"
+
+    def test_retake_prefers_cpu_for_gguf_text_encoder(self) -> None:
+        text_encoder = torch.nn.Linear(1, 1)
+        text_encoder._ltx_gguf_text_encoder = True  # type: ignore[attr-defined]
+
+        device = _resolve_text_encoder_device(
+            text_encoder,
+            offload_strategy_name="NONE",
+            target_device=torch.device("cuda"),
+        )
+
+        assert device.type == "cpu"
 
 
 # ---------------------------------------------------------------------------

@@ -117,8 +117,9 @@ class LTXFastVideoPipeline:
         output_path: str,
         progress_callback: "Callable[[int, int], None] | None" = None,
         negative_prompt: str = "",
+        advanced_mode: str = "standard",
     ) -> None:
-        del negative_prompt
+        del negative_prompt, advanced_mode
         tiling_config = default_tiling_config()
         video, audio = self._run_inference(
             prompt=prompt,

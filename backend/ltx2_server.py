@@ -533,7 +533,7 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("LTX_PORT", "") or PORT)
     logger.info("=" * 60)
-    logger.info("LTX-2 Video Generation Server (FastAPI + Uvicorn)")
+    logger.info("LTX Web (FastAPI + Uvicorn)")
     log_hardware_info()
     logger.info("=" * 60)
 

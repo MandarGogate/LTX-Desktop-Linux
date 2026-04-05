@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -80,6 +81,26 @@ def _wrap_model_factory(method: Callable[[], Any], device: torch.device) -> Call
     return _wrapped
 
 
+
+def _resolve_text_encoder_device(
+    text_encoder: torch.nn.Module,
+    *,
+    offload_strategy_name: str,
+    target_device: torch.device,
+) -> torch.device:
+    """Choose the runtime device for text encoding.
+
+    GGUF text encoders should stay on CPU for retake/low-VRAM flows. Their
+    custom quantized layers dequantize per-layer and can OOM if the whole model
+    is moved to CUDA up front.
+    """
+    if getattr(text_encoder, "_ltx_gguf_text_encoder", False):
+        return torch.device("cpu")
+    if offload_strategy_name == "NONE":
+        return target_device
+    return torch.device("cpu")
+
+
 class LTXRetakePipeline:
     @staticmethod
     def create(
@@ -90,6 +111,7 @@ class LTXRetakePipeline:
         loras: list[LoraPathStrengthAndSDOps] | None = None,
         quantization: QuantizationPolicy | None = None,
         vram_manager: VRAMManager | None = None,
+        text_encoder_variant_path: str | None = None,
     ) -> RetakePipeline:
         return LTXRetakePipeline(
             checkpoint_path=checkpoint_path,
@@ -98,6 +120,7 @@ class LTXRetakePipeline:
             loras=loras or [],
             quantization=quantization,
             vram_manager=vram_manager,
+            text_encoder_variant_path=text_encoder_variant_path,
         )
 
     def __init__(
@@ -109,6 +132,7 @@ class LTXRetakePipeline:
         loras: list[LoraPathStrengthAndSDOps],
         quantization: QuantizationPolicy | None,
         vram_manager: VRAMManager | None,
+        text_encoder_variant_path: str | None,
     ) -> None:
         from ltx_pipelines.utils import ModelLedger
         from ltx_pipelines.utils.types import PipelineComponents
@@ -119,6 +143,8 @@ class LTXRetakePipeline:
         self.dtype = torch.bfloat16
         self.vram_manager = vram_manager or VRAMManager(device, 0)
         self._block_swap_wrapper: FastBlockSwapWrapper | None = None
+        self._gemma_root = gemma_root
+        self._text_encoder_variant_path = text_encoder_variant_path
 
         self.model_ledger = ModelLedger(
             dtype=self.dtype,
@@ -128,6 +154,7 @@ class LTXRetakePipeline:
             loras=loras,  # type: ignore[arg-type]  # upstream ModelLedger accepts list at runtime
             quantization=quantization,
         )
+        self._maybe_configure_text_encoder_variant(checkpoint_path)
 
         self.pipeline_components = PipelineComponents(
             dtype=self.dtype,
@@ -152,6 +179,101 @@ class LTXRetakePipeline:
             legacy_retake_module.encode_text = _encode_text_on_device
         except ModuleNotFoundError:
             pass
+
+    def _maybe_configure_text_encoder_variant(self, checkpoint_path: str) -> None:
+        if (
+            not self._text_encoder_variant_path
+            or not self._gemma_root
+            or not Path(self._text_encoder_variant_path).exists()
+        ):
+            return
+
+        try:
+            variant_path = str(Path(self._text_encoder_variant_path))
+            if not hasattr(self.model_ledger, "_default_text_encoder_builder"):
+                setattr(
+                    self.model_ledger,
+                    "_default_text_encoder_builder",
+                    self.model_ledger.text_encoder_builder,
+                )
+            if variant_path.lower().endswith(".gguf"):
+                from services.text_encoder.gguf_text_encoder_builder import (
+                    GGUFGemmaTextEncoderBuilder,
+                )
+
+                self.model_ledger.text_encoder_builder = GGUFGemmaTextEncoderBuilder(
+                    base_builder=self.model_ledger.text_encoder_builder,
+                    checkpoint_path=getattr(
+                        self.model_ledger.text_encoder_builder,
+                        "model_path",
+                        str(checkpoint_path),
+                    ),
+                    gguf_path=variant_path,
+                )
+            else:
+                from ltx_core.loader.registry import DummyRegistry
+                from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder as Builder
+                from ltx_core.text_encoders.gemma import (
+                    AV_GEMMA_TEXT_ENCODER_KEY_OPS,
+                    GEMMA_MODEL_OPS,
+                    GemmaTextEncoderConfigurator,
+                    module_ops_from_gemma_root,
+                )
+                from services.text_encoder.safetensors_text_encoder_builder import (
+                    SafetensorsGemmaTextEncoderBuilder,
+                )
+                from services.text_encoder.text_encoder_variant_utils import (
+                    variant_uses_wrapped_gemma_text_encoder_keys,
+                )
+
+                variant_model_path: tuple[str, ...]
+                variant_path_obj = Path(variant_path)
+                if variant_path_obj.is_dir():
+                    shard_paths = sorted(str(path) for path in variant_path_obj.glob("model-*.safetensors"))
+                    if not shard_paths:
+                        raise ValueError(
+                            f"Text encoder variant directory contains no model shards: {variant_path}"
+                        )
+                    variant_model_path = (str(checkpoint_path), *shard_paths)
+                    logger.info(
+                        "Retake: using sharded text encoder variant directory: %s (%d shards)",
+                        variant_path,
+                        len(shard_paths),
+                    )
+                else:
+                    variant_model_path = (str(checkpoint_path), variant_path)
+
+                module_ops = module_ops_from_gemma_root(self._gemma_root)
+                variant_module_ops = (
+                    (*module_ops,)
+                    if variant_uses_wrapped_gemma_text_encoder_keys(variant_path)
+                    else (GEMMA_MODEL_OPS, *module_ops)
+                )
+                if variant_module_ops == (*module_ops,):
+                    logger.info(
+                        "Retake: text encoder variant already uses wrapped keys; skipping GEMMA_MODEL_OPS prefix: %s",
+                        variant_path,
+                    )
+                base_variant_builder = Builder(
+                    model_path=variant_model_path,
+                    model_class_configurator=GemmaTextEncoderConfigurator,
+                    model_sd_ops=AV_GEMMA_TEXT_ENCODER_KEY_OPS,
+                    registry=DummyRegistry(),
+                    module_ops=variant_module_ops,
+                )
+                self.model_ledger.text_encoder_builder = SafetensorsGemmaTextEncoderBuilder(
+                    base_builder=base_variant_builder,
+                    checkpoint_sources=variant_model_path,
+                    module_ops=variant_module_ops,
+                    variant_path=variant_path,
+                )
+                logger.info("Retake: using text encoder variant: %s", variant_path)
+        except Exception as exc:
+            logger.warning(
+                "Retake: failed to configure text encoder variant %s: %s",
+                self._text_encoder_variant_path,
+                exc,
+            )
 
     def _setup_block_swap_if_needed(self, transformer: torch.nn.Module) -> torch.nn.Module:
         """Wrap transformer with block swap if strategy requires it.
@@ -357,7 +479,13 @@ class LTXRetakePipeline:
 
         # --- Text encoding ---
         text_encoder = self.model_ledger.text_encoder()
-        text_encoder.to(self.device)
+        text_encoder_device = _resolve_text_encoder_device(
+            text_encoder,
+            offload_strategy_name=self.vram_manager.offload_strategy.name,
+            target_device=self.device,
+        )
+        text_encoder.to(text_encoder_device)
+        logger.info("Retake: text encoding on %s", text_encoder_device)
 
         v_context_n: torch.Tensor | None = None
         a_context_n: torch.Tensor | None = None

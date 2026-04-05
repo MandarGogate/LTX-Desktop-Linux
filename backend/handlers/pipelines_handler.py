@@ -70,6 +70,26 @@ def _display_lora_selection(
     return ", ".join(selections) if selections else "none"
 
 
+def _resolve_text_encoder_variant_path(models_dir: Path, preferred_path: str) -> str | None:
+    candidate = models_dir / preferred_path
+    if not candidate.exists():
+        return None
+
+    if candidate.is_file() and candidate.suffix.lower() == ".safetensors":
+        parent = candidate.parent
+        if candidate.name.startswith("model-") and "-of-" in candidate.stem:
+            shard_paths = sorted(parent.glob("model-*.safetensors"))
+            if len(shard_paths) > 1:
+                logger.info(
+                    "Using text encoder variant directory %s for shard selection %s",
+                    parent,
+                    candidate.name,
+                )
+                return str(parent)
+
+    return str(candidate)
+
+
 def _looks_like_incomplete_transformer_checkpoint(checkpoint_path: Path) -> bool:
     """Detect the known 4-tensor safetensors shim that is not a full transformer."""
     if checkpoint_path.suffix.lower() != ".safetensors":
@@ -804,12 +824,10 @@ class PipelinesHandler(StateHandlerBase):
             self.state.app_settings.preferred_text_encoder_path.strip()
         )
         text_encoder_variant_path = None
-        if (
-            preferred_text_encoder_path
-            and (self.models_dir / preferred_text_encoder_path).exists()
-        ):
-            text_encoder_variant_path = str(
-                self.models_dir / preferred_text_encoder_path
+        if preferred_text_encoder_path:
+            text_encoder_variant_path = _resolve_text_encoder_variant_path(
+                self.models_dir,
+                preferred_text_encoder_path,
             )
 
         if model_type in ("fast", "balanced"):
@@ -1423,12 +1441,10 @@ class PipelinesHandler(StateHandlerBase):
             self.state.app_settings.preferred_text_encoder_path.strip()
         )
         text_encoder_variant_path = None
-        if (
-            preferred_text_encoder_path
-            and (self.models_dir / preferred_text_encoder_path).exists()
-        ):
-            text_encoder_variant_path = str(
-                self.models_dir / preferred_text_encoder_path
+        if preferred_text_encoder_path:
+            text_encoder_variant_path = _resolve_text_encoder_variant_path(
+                self.models_dir,
+                preferred_text_encoder_path,
             )
 
         if model_type in ("fast", "balanced"):
@@ -1557,6 +1573,15 @@ class PipelinesHandler(StateHandlerBase):
         from ltx_core.quantization import QuantizationPolicy
 
         quantization = QuantizationPolicy.fp8_cast() if quantized else None
+        preferred_text_encoder_path = (
+            self.state.app_settings.preferred_text_encoder_path.strip()
+        )
+        text_encoder_variant_path = None
+        if preferred_text_encoder_path:
+            text_encoder_variant_path = _resolve_text_encoder_variant_path(
+                self.models_dir,
+                preferred_text_encoder_path,
+            )
         pipeline = self._retake_pipeline_class.create(
             checkpoint_path=checkpoint_path,
             gemma_root=self._text_handler.resolve_gemma_root(),
@@ -1564,6 +1589,7 @@ class PipelinesHandler(StateHandlerBase):
             loras=[],
             quantization=quantization,
             vram_manager=vram_manager,
+            text_encoder_variant_path=text_encoder_variant_path,
         )
         state = RetakePipelineState(
             pipeline=pipeline,
